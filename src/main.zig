@@ -7,6 +7,14 @@ const git = @cImport({
     @cInclude("git2.h");
 });
 
+pub fn tree_callback(root: [*c]const u8, entry: ?*const git.git_tree_entry, payload: ?*anyopaque) callconv(.C) c_int {
+    std.debug.print("{s}{s}\n", .{ root, git.git_tree_entry_name(entry) });
+
+    // _ = entry;
+    _ = payload;
+    return 0;
+}
+
 pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
@@ -36,6 +44,22 @@ pub fn main() !void {
         return error.Failed;
     }
     defer git.git_object_free(treeish);
+
+    var commit: ?*git.git_commit = null;
+    err = git.git_commit_lookup(&commit, repo, git.git_object_id(treeish));
+    if (err < 0) {
+        return error.Failed;
+    }
+
+    // typedef int git_treewalk_cb(const char *root, const git_tree_entry *entry, void *payload);
+
+    var tree: ?*git.git_tree = null;
+    err = git.git_commit_tree(&tree, commit);
+    if (err < 0) {
+        return error.Failed;
+    }
+
+    _ = git.git_tree_walk(tree, git.GIT_TREEWALK_PRE, tree_callback, null);
 
     const operations: fuse.fuse_operations = undefined;
 
