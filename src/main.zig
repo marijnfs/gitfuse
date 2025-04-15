@@ -51,21 +51,26 @@ pub fn main() !void {
         return error.Failed;
     }
 
-    // typedef int git_treewalk_cb(const char *root, const git_tree_entry *entry, void *payload);
-
     var tree: ?*git.git_tree = null;
     err = git.git_commit_tree(&tree, commit);
     if (err < 0) {
         return error.Failed;
     }
 
+    {
+        const entry = git.git_tree_entry_byname(tree, "doc");
+        std.debug.print("found: {any}\n", .{entry});
+
+        // std.debug.print("found: {s}\n", .{git.git_tree_entry_name(entry)});
+    }
+
     _ = git.git_tree_walk(tree, git.GIT_TREEWALK_PRE, tree_callback, null);
 
-    const operations: fuse.fuse_operations = undefined;
+    // const operations: fuse.fuse_operations = undefined;
 
-    const argc: c_int = 0;
-    const argv: [*c][*c]u8 = undefined;
-    _ = fuse.fuse_main_real(argc, argv, &operations, @sizeOf(@TypeOf(operations)), null);
+    // const argc: c_int = 0;
+    // const argv: [*c][*c]u8 = undefined;
+    // _ = fuse.fuse_main_real(argc, argv, &operations, @sizeOf(@TypeOf(operations)), null);
 
     try bw.flush(); // don't forget to flush!
 }
