@@ -7,6 +7,8 @@ const git = @cImport({
     @cInclude("git2.h");
 });
 
+const zli = @import("zli");
+
 pub fn tree_callback(root: [*c]const u8, entry: ?*const git.git_tree_entry, payload: ?*anyopaque) callconv(.C) c_int {
     std.debug.print("{s}{s}\n", .{ root, git.git_tree_entry_name(entry) });
 
@@ -19,6 +21,14 @@ pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
 
+    const ally = std.heap.page_allocator;
+    var args = std.ArrayList([:0]const u8).init(ally);
+    {
+        var iterator = try std.process.argsWithAllocator(ally);
+        while (iterator.next()) |arg| {
+            try args.append(arg);
+        }
+    }
     // stdout is for the actual output of your application, for example if you
     // are implementing gzip, then only the compressed bytes should be sent to
     // stdout, not any debugging messages.
@@ -58,13 +68,39 @@ pub fn main() !void {
     }
 
     {
-        const entry = git.git_tree_entry_byname(tree, "doc");
-        std.debug.print("found: {any}\n", .{entry});
+        const path = args.items[1];
+
+        var iterator = std.mem.tokenize(u8, path, "/");
+        while (iterator.next()) |name| {
+            if (std.mem.eql(u8, name, ".")) {
+                continue;
+            }
+            std.log.info("looking up: {s}", .{name});
+            const namez = try ally.dupeZ(u8, name);
+            const entry = git.git_tree_entry_byname(tree, namez);
+            if (entry == null)
+                return error.NotFound;
+
+            const entry_type = git.git_tree_entry_type(entry);
+
+            if (entry_type == git.GIT_OBJ_BLOB) {
+                return error.FoundBlob;
+            }
+
+            if (entry_type == git.GIT_OBJ_TREE) {
+                const oid = git.git_tree_entry_id(entry);
+                err = git.git_tree_lookup(&tree, repo, oid);
+                if (err < 0) {
+                    return error.Failed;
+                }
+            }
+        }
+        // std.debug.print("found: {any}\n", .{entry});
 
         // std.debug.print("found: {s}\n", .{git.git_tree_entry_name(entry)});
     }
 
-    _ = git.git_tree_walk(tree, git.GIT_TREEWALK_PRE, tree_callback, null);
+    // _ = git.git_tree_walk(tree, git.GIT_TREEWALK_PRE, tree_callback, null);
 
     // const operations: fuse.fuse_operations = undefined;
 
