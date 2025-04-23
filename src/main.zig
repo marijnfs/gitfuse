@@ -22,11 +22,12 @@ pub fn main() !void {
     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
 
     const ally = std.heap.page_allocator;
-    var args = std.ArrayList([:0]const u8).init(ally);
+    var args = std.ArrayList([:0]u8).init(ally);
     {
         var iterator = try std.process.argsWithAllocator(ally);
         while (iterator.next()) |arg| {
-            try args.append(arg);
+            std.log.info("adding {s}", .{arg});
+            try args.append(try ally.dupeZ(u8, arg));
         }
     }
     // stdout is for the actual output of your application, for example if you
@@ -102,13 +103,56 @@ pub fn main() !void {
 
     // _ = git.git_tree_walk(tree, git.GIT_TREEWALK_PRE, tree_callback, null);
 
-    // const operations: fuse.fuse_operations = undefined;
+    const operations: fuse.fuse_operations = .{
+        .getattr = &getattr,
+        .readdir = &readdir,
+    };
 
     // const argc: c_int = 0;
     // const argv: [*c][*c]u8 = undefined;
-    // _ = fuse.fuse_main_real(argc, argv, &operations, @sizeOf(@TypeOf(operations)), null);
+    var c_strings = try ally.alloc([*c]u8, args.items.len + 1);
+    for (0..args.items.len) |i| {
+        c_strings[i] = args.items[i];
+    }
+    c_strings[args.items.len] = null;
+
+    _ = fuse.fuse_main_real(@intCast(args.items.len), @ptrCast(c_strings), &operations, @sizeOf(@TypeOf(operations)), null);
 
     try bw.flush(); // don't forget to flush!
+}
+
+pub fn readdir(path: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir_t, offset: fuse.off_t, fi: ?*fuse.fuse_file_info, flags: fuse.fuse_readdir_flags) callconv(.C) c_int {
+    if (!std.mem.eql(u8, std.mem.span(path), "/")) {
+        const ENOENT = 2;
+        return -ENOENT;
+    }
+    _ = filler.?(buf, ".", null, 0, 0);
+    _ = filler.?(buf, "..", null, 0, 0);
+    _ = filler.?(buf, "bla", null, 0, 0);
+
+    _ = offset;
+    _ = fi;
+    _ = flags;
+    return 0;
+}
+
+pub fn getattr(path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    _ = fi;
+    stbuf.?.* = std.mem.zeroes(fuse.struct_stat);
+
+    if (std.mem.eql(u8, std.mem.span(path), "/")) {
+        stbuf.?.st_mode = fuse.S_IFDIR | 0x0755;
+        stbuf.?.st_nlink = 2;
+    } else if (std.mem.eql(u8, std.mem.span(path), "/bla")) {
+        stbuf.?.st_mode = fuse.S_IFREG | 0x0444;
+        stbuf.?.st_nlink = 1;
+        stbuf.?.st_size = 3;
+    } else {
+        const ENOENT = 2;
+        return -ENOENT;
+    }
+
+    return 0;
 }
 
 test "simple test" {
