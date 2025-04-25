@@ -106,33 +106,66 @@ pub fn main() !void {
     try init();
     defer deinit();
 
-    const path = args.items[1];
-    const path_tree = try get_dir(path);
-    list_git_dir(path_tree);
+    // const path = args.items[1];
+    // const path_tree = try get_dir(path);
+    // list_git_dir(path_tree);
     // _ = git.git_tree_walk(tree, git.GIT_TREEWALK_PRE, tree_callback, null);
 
-    // const operations: fuse.fuse_operations = .{
-    //     .getattr = &getattr,
-    //     .readdir = &readdir,
-    // };
+    const operations: fuse.fuse_operations = .{
+        .getattr = &getattr,
+        .readdir = &readdir,
+    };
 
-    // var c_strings = try ally.alloc([*c]u8, args.items.len + 1);
-    // for (0..args.items.len) |i| {
-    //     c_strings[i] = args.items[i];
-    // }
-    // c_strings[args.items.len] = null;
+    var c_strings = try ally.alloc([*c]u8, args.items.len + 1);
+    for (0..args.items.len) |i| {
+        c_strings[i] = args.items[i];
+    }
+    c_strings[args.items.len] = null;
+    _ = fuse.fuse_main_fn(@intCast(args.items.len), @ptrCast(c_strings), &operations, null);
 
+    while (true) {
+        std.time.sleep(1000);
+    }
+    std.log.info("Done", .{});
     // _ = fuse.fuse_main_real(@intCast(args.items.len), @ptrCast(c_strings), &operations, @sizeOf(@TypeOf(operations)), null);
 }
 
-pub fn readdir(path: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir_t, offset: fuse.off_t, fi: ?*fuse.fuse_file_info, flags: fuse.fuse_readdir_flags) callconv(.C) c_int {
-    if (!std.mem.eql(u8, std.mem.span(path), "/")) {
+pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir_t, offset: fuse.off_t, fi: ?*fuse.fuse_file_info, flags: fuse.fuse_readdir_flags) callconv(.C) c_int {
+    std.log.info("readdir: {s}", .{cpath});
+    const path= std.mem.span(cpath);
+    if (!std.mem.eql(u8, path, "/")) {
         const ENOENT = 2;
         return -ENOENT;
     }
-    _ = filler.?(buf, ".", null, 0, 0);
-    _ = filler.?(buf, "..", null, 0, 0);
-    _ = filler.?(buf, "bla", null, 0, 0);
+
+    const path_tree =  get_dir(path) catch unreachable;
+
+    const N = git.git_tree_entrycount(path_tree);
+    for (0..N) |n| {
+        var state = std.mem.zeroes(fuse.struct_stat);
+
+        const entry = git.git_tree_entry_byindex(path_tree, n);
+        const name = git.git_tree_entry_name(entry);
+        // const fmode: c_uint = @intCast(git.git_tree_entry_filemode(entry));
+        const ftype = git.git_tree_entry_type(entry);
+
+        switch (ftype) {
+            git.GIT_OBJ_TREE => {
+                state.st_mode = fuse.S_IFDIR;// | fmode;
+                state.st_nlink = 2;
+                _ = filler.?(buf, name, &state, 0, 0);
+            },
+            git.GIT_OBJ_BLOB => {
+                state.st_mode = fuse.S_IFREG;// | fmode;
+                state.st_nlink = 1;
+                _ = filler.?(buf, name, &state, 0, 0);
+            },
+            else => {
+                @panic("Help");
+            }
+        }
+        std.log.info("entry: {s}", .{name});
+    }
 
     _ = offset;
     _ = fi;
@@ -145,10 +178,10 @@ pub fn getattr(path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_fi
     stbuf.?.* = std.mem.zeroes(fuse.struct_stat);
 
     if (std.mem.eql(u8, std.mem.span(path), "/")) {
-        stbuf.?.st_mode = fuse.S_IFDIR | 0x0755;
+        stbuf.?.st_mode = fuse.S_IFDIR | 0o0755;
         stbuf.?.st_nlink = 2;
     } else if (std.mem.eql(u8, std.mem.span(path), "/bla")) {
-        stbuf.?.st_mode = fuse.S_IFREG | 0x0444;
+        stbuf.?.st_mode = fuse.S_IFREG | 0o0444;
         stbuf.?.st_nlink = 1;
         stbuf.?.st_size = 3;
     } else {
