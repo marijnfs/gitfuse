@@ -47,6 +47,8 @@ pub fn get_dir(path: []const u8) !*git.git_tree {
         defer ally.free(subpath_z);
 
         const entry = git.git_tree_entry_byname(current_tree, subpath_z);
+        if (entry == null)
+            return error.NotFound;
         std.debug.print("found: {any}\n", .{entry});
 
         const entry_type = git.git_tree_entry_type(entry);
@@ -59,6 +61,53 @@ pub fn get_dir(path: []const u8) !*git.git_tree {
     }
 
     return current_tree.?;
+}
+
+pub fn get_object(path: []const u8) !*git.git_object {
+    const branch = "refs/heads/master";
+
+    var treeish: ?*git.git_object = null;
+    try git_try(git.git_revparse_single(&treeish, repo, branch));
+    defer git.git_object_free(treeish);
+
+    var commit: ?*git.git_commit = null;
+    try git_try(git.git_commit_lookup(&commit, repo, git.git_object_id(treeish)));
+
+    var tree: ?*git.git_tree = null;
+    try git_try(git.git_commit_tree(&tree, commit));
+
+    var current_tree = tree;
+    var it = std.mem.tokenize(u8, path, "/");
+
+    while (it.next()) |subpath| {
+        const subpath_z = try ally.dupeZ(u8, subpath);
+        defer ally.free(subpath_z);
+
+        const entry = git.git_tree_entry_byname(current_tree, subpath_z);
+        if (entry == null)
+            return error.NotFound;
+        std.debug.print("found: {any}\n", .{entry});
+
+        const entry_type = git.git_tree_entry_type(entry);
+        const oid = git.git_tree_entry_id(entry);
+
+        const last_comparison = it.peek() == null;
+        if (last_comparison) {
+            var obj_c: ?*git.git_object = null;
+            try git_try(git.git_object_lookup(&obj_c, repo, oid, git.GIT_OBJECT_ANY));
+            if (obj_c == null) {
+                return error.FailedLookup;
+            }
+            return obj_c.?;
+        }
+        if (entry_type != git.GIT_OBJ_TREE) {
+            return error.ExpectedTree;
+        }
+
+        try git_try(git.git_tree_lookup(&current_tree, repo, oid));
+    }
+
+    return error.NotFound;
 }
 
 pub fn init() !void {
@@ -133,10 +182,11 @@ pub fn main() !void {
 pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir_t, offset: fuse.off_t, fi: ?*fuse.fuse_file_info, flags: fuse.fuse_readdir_flags) callconv(.C) c_int {
     std.log.info("readdir: {s}", .{cpath});
     const path = std.mem.span(cpath);
-    if (!std.mem.eql(u8, path, "/")) {
-        const ENOENT = 2;
-        return -ENOENT;
-    }
+
+    //if (!std.mem.eql(u8, path, "/")) {
+    //    const ENOENT = 2;
+    //    return -ENOENT;
+    //}
 
     const path_tree = get_dir(path) catch unreachable;
 
@@ -173,22 +223,45 @@ pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir
     return 0;
 }
 
-pub fn getattr(path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;
-    stbuf.?.* = std.mem.zeroes(fuse.struct_stat);
+    const path = std.mem.span(c_path);
+    var stat = std.mem.zeroes(fuse.struct_stat);
 
-    if (std.mem.eql(u8, std.mem.span(path), "/")) {
-        stbuf.?.st_mode = fuse.S_IFDIR | 0o0755;
-        stbuf.?.st_nlink = 2;
-    } else if (std.mem.eql(u8, std.mem.span(path), "/bla")) {
-        stbuf.?.st_mode = fuse.S_IFREG | 0o0444;
-        stbuf.?.st_nlink = 1;
-        stbuf.?.st_size = 3;
+    std.log.info("getattr: {s}", .{path});
+
+    // First deal with root case
+    const ROOT = "/";
+    if (std.mem.eql(u8, ROOT, path)) {
+        stat.st_mode = fuse.S_IFDIR | 0o0755;
+        stat.st_nlink = 2;
+        stbuf.?.* = stat;
+        return 0;
+    }
+
+    const object = get_object(path) catch {
+        std.log.debug("getattr no object: {s}", .{path});
+        const ENOENT = 2;
+        return -ENOENT;
+    };
+    const o_type = git.git_object_type(object);
+
+    if (o_type == git.GIT_OBJECT_BLOB) {
+        const blob: *git.git_blob = @ptrCast(object);
+        const size = git.git_blob_rawsize(blob);
+
+        stat.st_mode = fuse.S_IFREG | 0o0444;
+        stat.st_nlink = 1;
+        stat.st_size = @intCast(size);
+    } else if (o_type == git.GIT_OBJECT_TREE) {
+        stat.st_mode = fuse.S_IFDIR | 0o0755;
+        stat.st_nlink = 2;
     } else {
         const ENOENT = 2;
         return -ENOENT;
     }
 
+    stbuf.?.* = stat;
     return 0;
 }
 
