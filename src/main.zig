@@ -132,13 +132,13 @@ pub fn main() !void {
 
 pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir_t, offset: fuse.off_t, fi: ?*fuse.fuse_file_info, flags: fuse.fuse_readdir_flags) callconv(.C) c_int {
     std.log.info("readdir: {s}", .{cpath});
-    const path= std.mem.span(cpath);
+    const path = std.mem.span(cpath);
     if (!std.mem.eql(u8, path, "/")) {
         const ENOENT = 2;
         return -ENOENT;
     }
 
-    const path_tree =  get_dir(path) catch unreachable;
+    const path_tree = get_dir(path) catch unreachable;
 
     const N = git.git_tree_entrycount(path_tree);
     for (0..N) |n| {
@@ -151,18 +151,18 @@ pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir
 
         switch (ftype) {
             git.GIT_OBJ_TREE => {
-                state.st_mode = fuse.S_IFDIR;// | fmode;
+                state.st_mode = fuse.S_IFDIR | 0o0755; // | fmode;
                 state.st_nlink = 2;
                 _ = filler.?(buf, name, &state, 0, 0);
             },
             git.GIT_OBJ_BLOB => {
-                state.st_mode = fuse.S_IFREG;// | fmode;
+                state.st_mode = fuse.S_IFREG | 0o0444; // | fmode;
                 state.st_nlink = 1;
                 _ = filler.?(buf, name, &state, 0, 0);
             },
             else => {
                 @panic("Help");
-            }
+            },
         }
         std.log.info("entry: {s}", .{name});
     }
