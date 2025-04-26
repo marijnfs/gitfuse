@@ -20,7 +20,7 @@ pub fn tree_callback(root: [*c]const u8, entry: ?*const git.git_tree_entry, payl
 var repo: *git.git_repository = undefined;
 const ally = std.heap.c_allocator;
 
-var file_buffers: std.StringHashMap(std.ArrayList(u8)) = undefined;
+var file_buffers: std.StringHashMap(*std.ArrayList(u8)) = undefined;
 var fd_counter: u64 = 0;
 
 fn git_try(err_code: c_int) !void {
@@ -116,7 +116,7 @@ pub fn get_object(path: []const u8) !*git.git_object {
 pub fn init() !void {
     _ = git.git_libgit2_init();
 
-    file_buffers = std.StringHashMap(std.ArrayList(u8)).init(ally);
+    file_buffers = std.StringHashMap(*std.ArrayList(u8)).init(ally);
     {
         const path = ".";
         var repo_tmp: ?*git.git_repository = null;
@@ -307,9 +307,15 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
 
     const content = content_ptr[0..size];
     const buffer_copy = ally.dupe(u8, content) catch unreachable;
-    std.log.debug("Putting path {s}, size: {}",.{path, buffer_copy.len});
-    file_buffers.put(path, std.ArrayList(u8).fromOwnedSlice(ally, buffer_copy)) catch unreachable;
-    std.log.debug("Done",.{});
+    std.log.debug("Putting path '{s}', size: {}", .{ path, buffer_copy.len });
+
+    const new_buf = ally.create(std.ArrayList(u8)) catch unreachable;
+    new_buf.* = std.ArrayList(u8).fromOwnedSlice(ally, buffer_copy);
+
+    const key = ally.dupe(u8, path) catch unreachable;
+    file_buffers.put(key, new_buf) catch unreachable;
+
+    std.log.debug("Done {}", .{file_buffers.count()});
 
     return 0;
 }
@@ -333,6 +339,13 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
     const path = std.mem.span(c_path);
     const offset: usize = @intCast(offset_c);
 
+    std.log.debug("buf count {}", .{file_buffers.count()});
+    var it = file_buffers.keyIterator();
+    std.log.debug("has {}", .{file_buffers.contains(path)});
+    while (it.next()) |key| {
+        std.log.debug("it '{s}'", .{key.*});
+    }
+
     if (file_buffers.get(path)) |list| {
         const buffer = list.items;
         var copy_size = buf_size;
@@ -344,7 +357,7 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
 
         return @intCast(copy_size);
     }
-    std.log.debug("path not found {s}", .{path});
+    std.log.debug("path not found '{s}'", .{path});
     const ENOENT = 2;
     return -ENOENT;
 }
