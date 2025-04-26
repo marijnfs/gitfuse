@@ -18,7 +18,10 @@ pub fn tree_callback(root: [*c]const u8, entry: ?*const git.git_tree_entry, payl
 }
 
 var repo: *git.git_repository = undefined;
-const ally = std.heap.page_allocator;
+const ally = std.heap.c_allocator;
+
+var file_buffers: std.StringHashMap(std.ArrayList(u8)) = undefined;
+var fd_counter: u64 = 0;
 
 fn git_try(err_code: c_int) !void {
     if (err_code < 0) {
@@ -113,6 +116,7 @@ pub fn get_object(path: []const u8) !*git.git_object {
 pub fn init() !void {
     _ = git.git_libgit2_init();
 
+    file_buffers = std.StringHashMap(std.ArrayList(u8)).init(ally);
     {
         const path = ".";
         var repo_tmp: ?*git.git_repository = null;
@@ -165,6 +169,7 @@ pub fn main() !void {
         .readdir = &readdir,
         .open = &open,
         .read = &read,
+        .release = &release,
     };
 
     var c_strings = try ally.alloc([*c]u8, args.items.len + 1);
@@ -268,17 +273,12 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
 }
 
 pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
-    std.log.debug("Opening {s}", .{c_path});
     _ = fi;
-    return 0;
-}
+    // bitfields don't work for zig 0.13, so we use the path for now
 
-pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.off_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
-    std.log.debug("Reading {s}", .{c_path});
-    _ = fi;
+    std.log.debug("Opening {s}", .{c_path});
 
     const path = std.mem.span(c_path);
-    const offset: usize = @intCast(offset_c);
 
     const object = get_object(path) catch {
         std.log.debug("read: no object: {s}", .{path});
@@ -305,15 +305,48 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
     const content_ptr: [*c]const u8 = @ptrCast(content_c.?);
     const size = git.git_blob_rawsize(blob);
 
-    var copy_size: usize = buf_size;
-    if (offset + copy_size >= size) {
-        copy_size = size - offset;
-    }
     const content = content_ptr[0..size];
-    std.log.debug("sizes: copy{} off{} total{}", .{copy_size, offset, size});
-    @memcpy(buf[0..copy_size], content[offset .. offset + copy_size]);
+    const buffer_copy = ally.dupe(u8, content) catch unreachable;
+    std.log.debug("Putting path {s}, size: {}",.{path, buffer_copy.len});
+    file_buffers.put(path, std.ArrayList(u8).fromOwnedSlice(ally, buffer_copy)) catch unreachable;
+    std.log.debug("Done",.{});
 
-    return @intCast(copy_size);
+    return 0;
+}
+
+pub fn release(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    std.log.debug("Release {s}", .{c_path});
+    const path = std.mem.span(c_path);
+    if (file_buffers.get(path)) |list| {
+        list.deinit();
+        _ = file_buffers.remove(path);
+    }
+    _ = fi;
+    return 0;
+}
+
+pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.off_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    _ = fi;
+
+    std.log.debug("Reading {s}", .{c_path});
+
+    const path = std.mem.span(c_path);
+    const offset: usize = @intCast(offset_c);
+
+    if (file_buffers.get(path)) |list| {
+        const buffer = list.items;
+        var copy_size = buf_size;
+        if (offset + copy_size >= buffer.len) {
+            copy_size = buffer.len - offset;
+        }
+        @memcpy(buf[0..copy_size], buffer[offset .. offset + copy_size]);
+        std.log.debug("sizes: copy{} off{} total{}", .{ copy_size, offset, buffer.len });
+
+        return @intCast(copy_size);
+    }
+    std.log.debug("path not found {s}", .{path});
+    const ENOENT = 2;
+    return -ENOENT;
 }
 
 test "simple test" {
