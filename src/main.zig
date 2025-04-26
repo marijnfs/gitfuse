@@ -163,6 +163,8 @@ pub fn main() !void {
     const operations: fuse.fuse_operations = .{
         .getattr = &getattr,
         .readdir = &readdir,
+        .open = &open,
+        .read = &read,
     };
 
     var c_strings = try ally.alloc([*c]u8, args.items.len + 1);
@@ -263,6 +265,55 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
 
     stbuf.?.* = stat;
     return 0;
+}
+
+pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    std.log.debug("Opening {s}", .{c_path});
+    _ = fi;
+    return 0;
+}
+
+pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.off_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    std.log.debug("Reading {s}", .{c_path});
+    _ = fi;
+
+    const path = std.mem.span(c_path);
+    const offset: usize = @intCast(offset_c);
+
+    const object = get_object(path) catch {
+        std.log.debug("read: no object: {s}", .{path});
+        const ENOENT = 2;
+        return -ENOENT;
+    };
+
+    const o_type = git.git_object_type(object);
+    if (o_type != git.GIT_OBJECT_BLOB) {
+        std.log.debug("object not blob: {s}", .{path});
+        const ENOENT = 2;
+        return -ENOENT;
+    }
+
+    const blob: *git.git_blob = @ptrCast(object);
+    defer git.git_blob_free(blob);
+
+    const content_c = git.git_blob_rawcontent(blob);
+    if (content_c == null) {
+        std.log.debug("blob has no content: {s}", .{path});
+        const ENOENT = 2;
+        return -ENOENT;
+    }
+    const content_ptr: [*c]const u8 = @ptrCast(content_c.?);
+    const size = git.git_blob_rawsize(blob);
+
+    var copy_size: usize = buf_size;
+    if (offset + copy_size >= size) {
+        copy_size = size - offset;
+    }
+    const content = content_ptr[0..size];
+    std.log.debug("sizes: copy{} off{} total{}", .{copy_size, offset, size});
+    @memcpy(buf[0..copy_size], content[offset .. offset + copy_size]);
+
+    return @intCast(copy_size);
 }
 
 test "simple test" {
