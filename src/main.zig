@@ -170,6 +170,10 @@ pub fn main() !void {
         .open = &open,
         .read = &read,
         .release = &release,
+        .create = &create,
+        .flush = &flush,
+        .fsync = &fsync,
+        .write = &write,
     };
 
     var c_strings = try ally.alloc([*c]u8, args.items.len + 1);
@@ -213,7 +217,7 @@ pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir
                 _ = filler.?(buf, name, &state, 0, 0);
             },
             git.GIT_OBJ_BLOB => {
-                state.st_mode = fuse.S_IFREG | 0o0444; // | fmode;
+                state.st_mode = fuse.S_IFREG | 0o0222; // | fmode;
                 state.st_nlink = 1;
                 _ = filler.?(buf, name, &state, 0, 0);
             },
@@ -246,6 +250,14 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
         return 0;
     }
 
+    // Look at existing buffers
+    if (file_buffers.get(path)) |buffer| {
+        stat.st_mode = fuse.S_IFREG | 0o0222;
+        stat.st_nlink = 1;
+        stat.st_size = @intCast(buffer.items.len);
+        return 0;
+    }
+
     const object = get_object(path) catch {
         std.log.debug("getattr no object: {s}", .{path});
         const ENOENT = 2;
@@ -257,7 +269,7 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
         const blob: *git.git_blob = @ptrCast(object);
         const size = git.git_blob_rawsize(blob);
 
-        stat.st_mode = fuse.S_IFREG | 0o0444;
+        stat.st_mode = fuse.S_IFREG | 0o0222;
         stat.st_nlink = 1;
         stat.st_size = @intCast(size);
     } else if (o_type == git.GIT_OBJECT_TREE) {
@@ -329,6 +341,43 @@ pub fn release(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_i
     }
     _ = fi;
     return 0;
+}
+
+pub fn create(c_path: [*c]const u8, mode: fuse.mode_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    _ = fi;
+    _ = mode;
+
+    std.log.debug("Create {s}", .{c_path});
+
+    const new_buf = ally.create(std.ArrayList(u8)) catch unreachable;
+    new_buf.* = std.ArrayList(u8).init(ally);
+    const key = ally.dupe(u8, std.mem.span(c_path)) catch unreachable;
+    file_buffers.put(key, new_buf) catch unreachable;
+
+    return 0;
+}
+
+pub fn flush(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    _ = fi;
+
+    std.log.debug("Flush {s}", .{c_path});
+    return 0;
+}
+
+pub fn fsync(c_path: [*c]const u8, sync: c_int, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    _ = sync;
+    _ = fi;
+
+    std.log.debug("Fsync {s}", .{c_path});
+    return 0;
+}
+
+pub fn write(c_path: [*c]const u8, buf: [*c]const u8, buf_size: usize, offset: fuse.off_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    _ = fi;
+    _ = buf;
+
+    std.log.debug("Write {s} {} {}", .{ c_path, buf_size, offset });
+    return @intCast(buf_size);
 }
 
 pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.off_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
