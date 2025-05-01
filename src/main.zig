@@ -113,14 +113,15 @@ pub fn get_object(path: []const u8) !*git.git_object {
     return error.NotFound;
 }
 
+const repo_path = "/home/marijnfs/dev/gitfuse.git";
+
 pub fn init() !void {
     _ = git.git_libgit2_init();
 
     file_buffers = std.StringHashMap(*std.ArrayList(u8)).init(ally);
     {
-        const path = ".";
         var repo_tmp: ?*git.git_repository = null;
-        const err = git.git_repository_open(&repo_tmp, path);
+        const err = git.git_repository_open(&repo_tmp, repo_path);
         if (err < 0) {
             return error.Failed;
         }
@@ -132,6 +133,168 @@ pub fn deinit() void {
     _ = git.git_libgit2_shutdown();
 
     git.git_repository_free(repo);
+}
+
+pub fn create_commit(tree: *git.git_tree, parent: *git.git_commit, reference: []const u8) !git.git_oid {
+    var oid = std.mem.zeroes(git.git_oid);
+
+    const author: git.git_signature = .{
+        .name = @constCast("gitfuse"),
+        .email = @constCast(""),
+        .when = .{
+            .time = std.time.timestamp(),
+            .offset = 0,
+            .sign = 0,
+        },
+    };
+
+    const parents: [1]*git.git_commit = .{parent};
+
+    const reference_c = try ally.dupeZ(u8, reference);
+    try git_try(git.git_commit_create(&oid, repo, reference_c, &author, &author, "UTF-8", "GitFuse", tree, parents.len, @constCast(@ptrCast(&parents))));
+
+    return oid;
+}
+
+const Reference = struct {
+    commit: *git.git_commit,
+    tree: *git.git_tree,
+};
+
+pub fn get_reference() !Reference {
+    var reference_treeish: ?*git.git_object = null;
+
+    const reference_branch = "refs/heads/master";
+    try git_try(git.git_revparse_single(&reference_treeish, repo, reference_branch));
+
+    var ref_commit: ?*git.git_commit = null;
+    try git_try(git.git_commit_lookup(&ref_commit, repo, git.git_object_id(reference_treeish)));
+
+    var ref_tree: ?*git.git_tree = null;
+    try git_try(git.git_commit_tree(&ref_tree, ref_commit));
+
+    return .{
+        .commit = ref_commit.?,
+        .tree = ref_tree.?,
+    };
+}
+
+pub fn get_active_tree() !*git.git_tree {
+    const target_branch = "refs/heads/gitfuse";
+
+    var treeish: ?*git.git_object = null;
+    git_try(git.git_revparse_single(&treeish, repo, target_branch)) catch {
+        std.log.debug("Didn't find target branch, creating it", .{});
+
+        const ref = try get_reference();
+
+        _ = try create_commit(ref.tree, ref.commit, target_branch);
+
+        // Finally the treeish is gonna point to the ref tree
+        return ref.tree;
+    };
+
+
+    var ref_commit: ?*git.git_commit = null;
+    try git_try(git.git_commit_lookup(&ref_commit, repo, git.git_object_id(treeish)));
+
+    var ref_tree: ?*git.git_tree = null;
+    try git_try(git.git_commit_tree(&ref_tree, ref_commit));
+
+    return ref_tree.?;
+}
+
+// Make the file buffer of 'path' persistent.
+// This means updating the target branch with the contents of this buffer.
+// Does not close the buffer.
+// If buffer does not exist, that is an error
+pub fn persist_file_buffer(path: []const u8) !void {
+    if (file_buffers.get(path)) |buffer| {
+        // First we create the blob and get the oid
+        var buffer_iod = std.mem.zeroes(git.git_oid);
+        try git_try(git.git_blob_create_from_buffer(&buffer_iod, repo, @ptrCast(&buffer.items), buffer.items.len));
+
+        // Grab our active target tree and setup the builder
+        const active_tree = try get_active_tree();
+        const reference = try get_reference();
+
+        // Find the sequence of trees to the path
+        var trees = std.ArrayList(*git.git_tree).init(ally);
+        var paths = std.ArrayList([]const u8).init(ally);
+        var it = std.mem.tokenize(u8, path, "/");
+
+        var current_tree: ?*git.git_tree = active_tree;
+
+        while (it.next()) |subpath| {
+            try trees.append(current_tree.?);
+            try paths.append(subpath);
+
+            const subpath_z = try ally.dupeZ(u8, subpath);
+            defer ally.free(subpath_z);
+
+            const entry = git.git_tree_entry_byname(current_tree, subpath_z);
+            if (entry == null)
+                return error.NotFound;
+            std.debug.print("found: {any}\n", .{entry});
+
+            const entry_type = git.git_tree_entry_type(entry);
+            const sub_oid = git.git_tree_entry_id(entry);
+
+            const last_comparison = it.peek() == null;
+            if (last_comparison) {
+                var obj_c: ?*git.git_object = null;
+                try git_try(git.git_object_lookup(&obj_c, repo, sub_oid, git.GIT_OBJECT_ANY));
+                if (obj_c == null) {
+                    return error.FailedLookup;
+                }
+
+                // We are on the last level and found the file
+                break;
+            }
+            if (entry_type != git.GIT_OBJ_TREE) {
+                return error.ExpectedTree;
+            }
+
+            try git_try(git.git_tree_lookup(&current_tree, repo, sub_oid));
+        }
+
+        // Now recursively build up the updated tree
+        var i: usize = trees.items.len;
+        var current_oid = buffer_iod;
+        while (i > 0) {
+            i -= 1;
+            const tree = trees.items[i];
+            const subpath = paths.items[i];
+            const subpath_c = try ally.dupeZ(u8, subpath);
+            var builder: ?*git.git_treebuilder = null;
+            try git_try(git.git_treebuilder_new(&builder, repo, tree));
+            defer git.git_treebuilder_free(builder);
+
+            const mode: git.git_filemode_t = 0o0222;
+            try git_try(git.git_treebuilder_insert(null, builder, subpath_c, &current_oid, mode));
+            var tree_oid: git.git_oid = undefined;
+            try git_try(git.git_treebuilder_write(&tree_oid, builder));
+
+            current_oid = tree_oid;
+        }
+
+        // Now the new tree id is current_oid
+        // Set up the commit
+        const target_branch = "refs/heads/gitfuse";
+
+        const new_tree_oid = current_oid;
+
+        var new_tree: ?*git.git_tree = null;
+        try git_try(git.git_tree_lookup(&new_tree, repo, &new_tree_oid));
+        _ = try create_commit(
+            new_tree.?,
+            reference.commit,
+
+            target_branch,
+        );
+    } else {
+        return error.BufferNotFound;
+    }
 }
 
 pub fn list_git_dir(tree: *git.git_tree) void {
@@ -286,6 +449,8 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
 
 pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;
+    // fi.?.direct_io = 1;
+        
     // bitfields don't work for zig 0.13, so we use the path for now
 
     std.log.debug("Opening {s}", .{c_path});
@@ -335,6 +500,9 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
 pub fn release(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     std.log.debug("Release {s}", .{c_path});
     const path = std.mem.span(c_path);
+
+    persist_file_buffer(path) catch unreachable;
+
     if (file_buffers.get(path)) |list| {
         list.deinit();
         _ = file_buffers.remove(path);
@@ -359,8 +527,9 @@ pub fn create(c_path: [*c]const u8, mode: fuse.mode_t, fi: ?*fuse.fuse_file_info
 
 pub fn flush(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;
-
+    const path = std.mem.span(c_path);
     std.log.debug("Flush {s}", .{c_path});
+    persist_file_buffer(path) catch unreachable;
     return 0;
 }
 
@@ -368,7 +537,10 @@ pub fn fsync(c_path: [*c]const u8, sync: c_int, fi: ?*fuse.fuse_file_info) callc
     _ = sync;
     _ = fi;
 
+
+    const path = std.mem.span(c_path);
     std.log.debug("Fsync {s}", .{c_path});
+    persist_file_buffer(path) catch unreachable;
     return 0;
 }
 
@@ -377,6 +549,10 @@ pub fn write(c_path: [*c]const u8, buf: [*c]const u8, buf_size: usize, offset: f
     _ = buf;
 
     std.log.debug("Write {s} {} {}", .{ c_path, buf_size, offset });
+    const path = std.mem.span(c_path);
+    if (file_buffers.get(path)) {
+
+    }
     return @intCast(buf_size);
 }
 
