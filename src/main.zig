@@ -17,6 +17,8 @@ var fd_counter: u64 = 0;
 
 fn git_try(err_code: c_int) !void {
     if (err_code < 0) {
+        const err: *const git.git_error = git.git_error_last();
+        std.log.warn("Git error: {s}", .{err.message});
         return error.git_error;
     }
 }
@@ -85,7 +87,7 @@ pub fn get_object(path: []const u8) !*git.git_object {
     return error.NotFound;
 }
 
-const repo_path = "/home/marijnfs/dev/gitfuse.git";
+const repo_path = "/home/marijnfs/tmp/gitfuse.git";
 
 pub fn init() !void {
     _ = git.git_libgit2_init();
@@ -107,7 +109,7 @@ pub fn deinit() void {
     git.git_repository_free(repo);
 }
 
-pub fn create_commit(tree: *git.git_tree, parent: *git.git_commit, reference: []const u8) !git.git_oid {
+pub fn create_commit(tree: *git.git_tree, parent: *git.git_commit, reference_opt: ?[]const u8) !git.git_oid {
     var oid = std.mem.zeroes(git.git_oid);
 
     const author: git.git_signature = .{
@@ -122,8 +124,18 @@ pub fn create_commit(tree: *git.git_tree, parent: *git.git_commit, reference: []
 
     const parents: [1]*git.git_commit = .{parent};
 
-    const reference_c = try ally.dupeZ(u8, reference);
-    try git_try(git.git_commit_create(&oid, repo, reference_c, &author, &author, "UTF-8", "GitFuse", tree, parents.len, @constCast(@ptrCast(&parents))));
+    try git_try(git.git_commit_create(&oid, repo, null, &author, &author, "UTF-8", "GitFuse", tree, parents.len, @constCast(@ptrCast(&parents))));
+
+    var commit: ?*git.git_commit = null;
+    try git_try(git.git_commit_lookup(&commit, repo, &oid));
+
+    if (reference_opt) |reference| {
+        const reference_c = try ally.dupeZ(u8, reference);
+
+        var git_reference: ?*git.git_reference = null;
+        const force = 1;
+        try git_try(git.git_branch_create(&git_reference, repo, reference_c, commit, force));
+    }
 
     return oid;
 }
@@ -152,7 +164,7 @@ pub fn get_reference() !Reference {
 }
 
 pub fn get_active_tree() !*git.git_tree {
-    const target_branch = "refs/heads/gitfuse";
+    const target_branch = "gitfuse";
 
     var treeish: ?*git.git_object = null;
     git_try(git.git_revparse_single(&treeish, repo, target_branch)) catch {
@@ -180,10 +192,11 @@ pub fn get_active_tree() !*git.git_tree {
 // Does not close the buffer.
 // If buffer does not exist, that is an error
 pub fn persist_file_buffer(path: []const u8) !void {
+    std.log.debug("Persisting: {s}", .{path});
     if (file_buffers.get(path)) |buffer| {
         // First we create the blob and get the oid
-        var buffer_iod = std.mem.zeroes(git.git_oid);
-        try git_try(git.git_blob_create_from_buffer(&buffer_iod, repo, @ptrCast(&buffer.items), buffer.items.len));
+        var buffer_oid = std.mem.zeroes(git.git_oid);
+        try git_try(git.git_blob_create_from_buffer(&buffer_oid, repo, @ptrCast(&buffer.items), buffer.items.len));
 
         // Grab our active target tree and setup the builder
         const active_tree = try get_active_tree();
@@ -200,10 +213,24 @@ pub fn persist_file_buffer(path: []const u8) !void {
             try trees.append(current_tree.?);
             try paths.append(subpath);
 
+
+            const last_comparison = it.peek() == null;
+            if (last_comparison) {
+                // var obj_c: ?*git.git_object = null;
+                // try git_try(git.git_object_lookup(&obj_c, repo, sub_oid, git.GIT_OBJECT_ANY));
+                // if (obj_c == null) {
+                //     return error.FailedLookup;
+                // }
+
+                // We are on the last level and found the file
+                break;
+            }
+
             const subpath_z = try ally.dupeZ(u8, subpath);
             defer ally.free(subpath_z);
 
             const entry = git.git_tree_entry_byname(current_tree, subpath_z);
+            std.log.debug("entry: {s}", .{subpath_z});
             if (entry == null)
                 return error.NotFound;
             std.debug.print("found: {any}\n", .{entry});
@@ -211,17 +238,6 @@ pub fn persist_file_buffer(path: []const u8) !void {
             const entry_type = git.git_tree_entry_type(entry);
             const sub_oid = git.git_tree_entry_id(entry);
 
-            const last_comparison = it.peek() == null;
-            if (last_comparison) {
-                var obj_c: ?*git.git_object = null;
-                try git_try(git.git_object_lookup(&obj_c, repo, sub_oid, git.GIT_OBJECT_ANY));
-                if (obj_c == null) {
-                    return error.FailedLookup;
-                }
-
-                // We are on the last level and found the file
-                break;
-            }
             if (entry_type != git.GIT_OBJ_TREE) {
                 return error.ExpectedTree;
             }
@@ -231,7 +247,7 @@ pub fn persist_file_buffer(path: []const u8) !void {
 
         // Now recursively build up the updated tree
         var i: usize = trees.items.len;
-        var current_oid = buffer_iod;
+        var new_oid = buffer_oid;
         while (i > 0) {
             i -= 1;
             const tree = trees.items[i];
@@ -241,26 +257,25 @@ pub fn persist_file_buffer(path: []const u8) !void {
             try git_try(git.git_treebuilder_new(&builder, repo, tree));
             defer git.git_treebuilder_free(builder);
 
-            const mode: git.git_filemode_t = 0o0222;
-            try git_try(git.git_treebuilder_insert(null, builder, subpath_c, &current_oid, mode));
+            const mode: git.git_filemode_t = git.GIT_FILEMODE_BLOB;
+            try git_try(git.git_treebuilder_insert(null, builder, subpath_c, &new_oid, mode));
             var tree_oid: git.git_oid = undefined;
             try git_try(git.git_treebuilder_write(&tree_oid, builder));
 
-            current_oid = tree_oid;
+            new_oid = tree_oid;
         }
 
-        // Now the new tree id is current_oid
+        // Now the new tree id is new_oid
         // Set up the commit
-        const target_branch = "refs/heads/gitfuse";
+        const target_branch = "gitfuse";
 
-        const new_tree_oid = current_oid;
+        const new_tree_oid = new_oid;
 
         var new_tree: ?*git.git_tree = null;
         try git_try(git.git_tree_lookup(&new_tree, repo, &new_tree_oid));
         _ = try create_commit(
             new_tree.?,
             reference.commit,
-
             target_branch,
         );
     } else {
@@ -346,7 +361,7 @@ pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir
                 _ = filler.?(buf, name, &state, 0, 0);
             },
             git.GIT_OBJ_BLOB => {
-                state.st_mode = fuse.S_IFREG | 0o0222; // | fmode;
+                state.st_mode = fuse.S_IFREG | 0o0644; // | fmode;
                 state.st_nlink = 1;
                 _ = filler.?(buf, name, &state, 0, 0);
             },
@@ -381,7 +396,7 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
 
     // Look at existing buffers
     if (file_buffers.get(path)) |buffer| {
-        stat.st_mode = fuse.S_IFREG | 0o0222;
+        stat.st_mode = fuse.S_IFREG | 0o0644;
         stat.st_nlink = 1;
         stat.st_size = @intCast(buffer.items.len);
         return 0;
@@ -398,7 +413,7 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
         const blob: *git.git_blob = @ptrCast(object);
         const size = git.git_blob_rawsize(blob);
 
-        stat.st_mode = fuse.S_IFREG | 0o0222;
+        stat.st_mode = fuse.S_IFREG | 0o0644;
         stat.st_nlink = 1;
         stat.st_size = @intCast(size);
     } else if (o_type == git.GIT_OBJECT_TREE) {
@@ -493,9 +508,9 @@ pub fn create(c_path: [*c]const u8, mode: fuse.mode_t, fi: ?*fuse.fuse_file_info
 
 pub fn flush(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;
-    const path = std.mem.span(c_path);
+    // const path = std.mem.span(c_path);
     std.log.debug("Flush {s}", .{c_path});
-    persist_file_buffer(path) catch unreachable;
+    // persist_file_buffer(path) catch unreachable;
     return 0;
 }
 
@@ -558,11 +573,4 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
     std.log.debug("path not found '{s}'", .{path});
     const ENOENT = 2;
     return -ENOENT;
-}
-
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
 }
