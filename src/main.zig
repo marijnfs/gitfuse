@@ -9,14 +9,6 @@ const git = @cImport({
 
 const zli = @import("zli");
 
-pub fn tree_callback(root: [*c]const u8, entry: ?*const git.git_tree_entry, payload: ?*anyopaque) callconv(.C) c_int {
-    std.debug.print("{s}{s}\n", .{ root, git.git_tree_entry_name(entry) });
-
-    // _ = entry;
-    _ = payload;
-    return 0;
-}
-
 var repo: *git.git_repository = undefined;
 const ally = std.heap.c_allocator;
 
@@ -30,19 +22,9 @@ fn git_try(err_code: c_int) !void {
 }
 
 pub fn get_dir(path: []const u8) !*git.git_tree {
-    const branch = "refs/heads/master";
+    const tree = try get_active_tree();
 
-    var treeish: ?*git.git_object = null;
-    try git_try(git.git_revparse_single(&treeish, repo, branch));
-    defer git.git_object_free(treeish);
-
-    var commit: ?*git.git_commit = null;
-    try git_try(git.git_commit_lookup(&commit, repo, git.git_object_id(treeish)));
-
-    var tree: ?*git.git_tree = null;
-    try git_try(git.git_commit_tree(&tree, commit));
-
-    var current_tree = tree;
+    var current_tree: ?*git.git_tree = tree;
     var it = std.mem.tokenize(u8, path, "/");
 
     while (it.next()) |subpath| {
@@ -67,19 +49,9 @@ pub fn get_dir(path: []const u8) !*git.git_tree {
 }
 
 pub fn get_object(path: []const u8) !*git.git_object {
-    const branch = "refs/heads/master";
+    const tree = try get_active_tree();
 
-    var treeish: ?*git.git_object = null;
-    try git_try(git.git_revparse_single(&treeish, repo, branch));
-    defer git.git_object_free(treeish);
-
-    var commit: ?*git.git_commit = null;
-    try git_try(git.git_commit_lookup(&commit, repo, git.git_object_id(treeish)));
-
-    var tree: ?*git.git_tree = null;
-    try git_try(git.git_commit_tree(&tree, commit));
-
-    var current_tree = tree;
+    var current_tree: ?*git.git_tree = tree;
     var it = std.mem.tokenize(u8, path, "/");
 
     while (it.next()) |subpath| {
@@ -193,7 +165,6 @@ pub fn get_active_tree() !*git.git_tree {
         // Finally the treeish is gonna point to the ref tree
         return ref.tree;
     };
-
 
     var ref_commit: ?*git.git_commit = null;
     try git_try(git.git_commit_lookup(&ref_commit, repo, git.git_object_id(treeish)));
@@ -322,11 +293,6 @@ pub fn main() !void {
     try init();
     defer deinit();
 
-    // const path = args.items[1];
-    // const path_tree = try get_dir(path);
-    // list_git_dir(path_tree);
-    // _ = git.git_tree_walk(tree, git.GIT_TREEWALK_PRE, tree_callback, null);
-
     const operations: fuse.fuse_operations = .{
         .getattr = &getattr,
         .readdir = &readdir,
@@ -450,7 +416,7 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
 pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;
     // fi.?.direct_io = 1;
-        
+
     // bitfields don't work for zig 0.13, so we use the path for now
 
     std.log.debug("Opening {s}", .{c_path});
@@ -537,21 +503,28 @@ pub fn fsync(c_path: [*c]const u8, sync: c_int, fi: ?*fuse.fuse_file_info) callc
     _ = sync;
     _ = fi;
 
-
     const path = std.mem.span(c_path);
     std.log.debug("Fsync {s}", .{c_path});
     persist_file_buffer(path) catch unreachable;
     return 0;
 }
 
-pub fn write(c_path: [*c]const u8, buf: [*c]const u8, buf_size: usize, offset: fuse.off_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+pub fn write(c_path: [*c]const u8, buf: [*c]const u8, buf_size: usize, offset_c: fuse.off_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;
-    _ = buf;
+
+    const offset: usize = @intCast(offset_c);
 
     std.log.debug("Write {s} {} {}", .{ c_path, buf_size, offset });
     const path = std.mem.span(c_path);
-    if (file_buffers.get(path)) {
+    if (file_buffers.get(path)) |file_buf| {
+        const minimum_size: usize = offset + buf_size;
 
+        if (minimum_size > file_buf.items.len) {
+            file_buf.ensureTotalCapacity(minimum_size) catch unreachable;
+            file_buf.expandToCapacity();
+        }
+
+        @memcpy(file_buf.items[offset .. offset + buf_size], buf[0..buf_size]);
     }
     return @intCast(buf_size);
 }
