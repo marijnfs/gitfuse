@@ -213,7 +213,6 @@ pub fn persist_file_buffer(path: []const u8) !void {
             try trees.append(current_tree.?);
             try paths.append(subpath);
 
-
             const last_comparison = it.peek() == null;
             if (last_comparison) {
                 // var obj_c: ?*git.git_object = null;
@@ -248,6 +247,7 @@ pub fn persist_file_buffer(path: []const u8) !void {
         // Now recursively build up the updated tree
         var i: usize = trees.items.len;
         var new_oid = buffer_oid;
+        var oid_mode: git.git_filemode_t = git.GIT_FILEMODE_BLOB;
         while (i > 0) {
             i -= 1;
             const tree = trees.items[i];
@@ -257,12 +257,12 @@ pub fn persist_file_buffer(path: []const u8) !void {
             try git_try(git.git_treebuilder_new(&builder, repo, tree));
             defer git.git_treebuilder_free(builder);
 
-            const mode: git.git_filemode_t = git.GIT_FILEMODE_BLOB;
-            try git_try(git.git_treebuilder_insert(null, builder, subpath_c, &new_oid, mode));
+            try git_try(git.git_treebuilder_insert(null, builder, subpath_c, &new_oid, oid_mode));
             var tree_oid: git.git_oid = undefined;
             try git_try(git.git_treebuilder_write(&tree_oid, builder));
 
             new_oid = tree_oid;
+            oid_mode = git.GIT_FILEMODE_TREE;
         }
 
         // Now the new tree id is new_oid
@@ -281,6 +281,7 @@ pub fn persist_file_buffer(path: []const u8) !void {
     } else {
         return error.BufferNotFound;
     }
+    std.log.debug("Done Persisting: {s}", .{path});
 }
 
 pub fn list_git_dir(tree: *git.git_tree) void {
