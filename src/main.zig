@@ -495,7 +495,7 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
 
     const path = std.mem.span(c_path);
     var stat = std.mem.zeroes(fuse.struct_stat);
-
+    defer stbuf.?.* = stat;
     stat.st_mtim = .{
         .tv_sec = get_modtime(path) catch unreachable,
         .tv_nsec = 0,
@@ -506,7 +506,7 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
     if (std.mem.eql(u8, ROOT, path)) {
         stat.st_mode = fuse.S_IFDIR | 0o0755;
         stat.st_nlink = 2;
-        stbuf.?.* = stat;
+        // stbuf.?.* = stat;
         return 0;
     }
 
@@ -515,6 +515,7 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
         stat.st_mode = fuse.S_IFREG | 0o0644;
         stat.st_nlink = 1;
         stat.st_size = @intCast(buffer.size());
+        // stbuf.?.* = stat;
         return 0;
     }
 
@@ -540,7 +541,7 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
         return -ENOENT;
     }
 
-    stbuf.?.* = stat;
+    // stbuf.?.* = stat;
     return 0;
 }
 
