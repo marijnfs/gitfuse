@@ -13,11 +13,34 @@ const zli = @import("zli");
 var repo: *git.git_repository = undefined;
 const ally = std.heap.c_allocator;
 
+const FuseFileInfo = packed struct {
+    flags: i32,
+    writepage: bool,
+    direct_io: bool,
+    keep_cache: bool,
+    flush: bool,
+    nonseekable: bool,
+    flock_release: bool,
+    cache_readdir: bool,
+    noflush: bool,
+    parallel_direct_writes: bool,
+    padding: u23,
+    padding2: u32,
+    padding3: u32,
+    fh: u64,
+    lock_owner: u64,
+    poll_events: u32,
+    backing_id: u32,
+    compat_flags: u64,
+    reserved: u64,
+    reserved2: u64,
+};
+
 const FileBuffer = struct {
     buffer: std.ArrayList(u8),
     read_only: bool,
 
-    pub fn contents(self: *FileBuffer) [] u8 {
+    pub fn contents(self: *FileBuffer) []u8 {
         return self.buffer.items;
     }
 
@@ -25,7 +48,7 @@ const FileBuffer = struct {
         return self.buffer.items.len;
     }
 
-    pub fn write(self: *FileBuffer, buffer: []const u8, offset: usize ) !void {
+    pub fn write(self: *FileBuffer, buffer: []const u8, offset: usize) !void {
         const total = buffer.len + offset;
         if (total > self.buffer.items.len) {
             try self.buffer.ensureTotalCapacityPrecise(total);
@@ -34,6 +57,10 @@ const FileBuffer = struct {
 
         std.log.debug("after grow: {s}", .{buffer});
         @memcpy(self.contents()[offset .. offset + buffer.len], buffer);
+    }
+
+    pub fn truncate(self: *FileBuffer) void {
+        self.buffer.clearAndFree();
     }
 
     fn init(allocator: std.mem.Allocator, read_only: bool) !*FileBuffer {
@@ -63,6 +90,7 @@ const FileBuffer = struct {
 };
 
 var file_buffers: std.StringHashMap(*FileBuffer) = undefined;
+var mod_times: std.StringHashMap(i64) = undefined;
 var fd_counter: u64 = 0;
 
 fn git_try(err_code: c_int) !void {
@@ -147,6 +175,8 @@ pub fn init() !void {
         try git_try(git.git_repository_open(&repo_tmp, repo_path));
         repo = repo_tmp.?;
     }
+
+    mod_times = std.StringHashMap(i64).init(ally);
 }
 
 pub fn deinit() void {
@@ -240,6 +270,10 @@ pub fn get_active_tree() !*git.git_tree {
 pub fn persist_file_buffer(path: []const u8) !void {
     std.log.debug("Persisting: {s}", .{path});
     if (file_buffers.get(path)) |buffer| {
+        if (buffer.read_only) {
+            return;
+        }
+
         // First we create the blob and get the oid
         var buffer_oid = std.mem.zeroes(git.git_oid);
         std.log.debug("Saving buffer: '{s}'", .{buffer.contents()});
@@ -332,6 +366,28 @@ pub fn persist_file_buffer(path: []const u8) !void {
         return error.BufferNotFound;
     }
     std.log.debug("Done Persisting: {s}", .{path});
+}
+
+pub fn update_modtime(path: []const u8) !i64 {
+    const cur = std.time.timestamp();
+
+    if (mod_times.getPtr(path)) |timestamp| {
+        timestamp.* = cur;
+        return cur;
+    }
+
+    try mod_times.put(try ally.dupe(u8, path), cur);
+    return cur;
+}
+
+pub fn get_modtime(path: []const u8) !i64 {
+    if (mod_times.get(path)) |timestamp| {
+        return timestamp;
+    }
+
+    const cur = std.time.timestamp();
+    try mod_times.put(try ally.dupe(u8, path), cur);
+    return cur;
 }
 
 pub fn list_git_dir(tree: *git.git_tree) void {
@@ -430,11 +486,20 @@ pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir
 }
 
 pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
-    _ = fi;
+    var packed_fi: ?*FuseFileInfo = null;
+    if (fi) |fi_ptr| {
+        packed_fi = @alignCast(@ptrCast(fi_ptr));
+    }
+
+    std.log.info("getattr: {s}", .{c_path});
+
     const path = std.mem.span(c_path);
     var stat = std.mem.zeroes(fuse.struct_stat);
 
-    std.log.info("getattr: {s}", .{path});
+    stat.st_mtim = .{
+        .tv_sec = get_modtime(path) catch unreachable,
+        .tv_nsec = 0,
+    };
 
     // First deal with root case
     const ROOT = "/";
@@ -485,14 +550,21 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
     // const fi_flags = git.fuse_file_info_flags(fi.?);
     // const fitmp = fi.?;
     // const fi_direct = fitmp.*;
-    const direct_ptr: *c_int = @ptrCast(@alignCast(fi.?));
-    const fi_flags = direct_ptr.*;
-    const trunc = (fi_flags | fuse.O_TRUNC) > 0;
+    const packed_fi: *FuseFileInfo = @alignCast(@ptrCast(fi.?));
+    packed_fi.fh = 123;
+
+    const fi_flags = packed_fi.flags;
+    // const direct_ptr: *c_int = @ptrCast(@alignCast(fi.?));
+    // const fi_flags = direct_ptr.*;
+    const trunc = (fi_flags & fuse.O_TRUNC) > 0;
     const access = fi_flags & fuse.O_ACCMODE;
     const append = access == fuse.O_APPEND;
     const write_only = access == fuse.O_WRONLY;
     const read_only = access == fuse.O_RDONLY;
     const read_write = access == fuse.O_RDWR;
+
+    // _ = packed_fi;
+    std.log.info("Packed: {}", .{packed_fi});
     //O_RDONLY = 32768. O_WRONLY=32769. O_RDWR = 32770. O_APPEND = 33792
     std.log.info("truncate trunc:{} acc:{} ro:{} wo:{} rw:{} append:{}", .{ trunc, access, read_only, write_only, read_write, append });
     // fi.?.direct_io = 1;
@@ -531,7 +603,11 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
 
     std.log.debug("Putting path '{s}', size: {}", .{ path, content.len });
 
-    const new_buf =  FileBuffer.init_buffer(ally, content, read_only) catch unreachable;
+    const new_buf = FileBuffer.init_buffer(ally, content, read_only) catch unreachable;
+
+    if (trunc) {
+        new_buf.truncate();
+    }
 
     const key = ally.dupe(u8, path) catch unreachable;
     file_buffers.put(key, new_buf) catch unreachable;
@@ -560,7 +636,6 @@ pub fn create(c_path: [*c]const u8, mode: fuse.mode_t, fi: ?*fuse.fuse_file_info
     _ = mode;
 
     std.log.debug("Create {s}", .{c_path});
-
 
     const read_only = false;
     const new_buf = FileBuffer.init(ally, read_only) catch unreachable;
@@ -594,15 +669,20 @@ pub fn truncate(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_
 }
 
 pub fn write(c_path: [*c]const u8, buf: [*c]const u8, buf_size: usize, offset_c: fuse.off_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
-    _ = fi;
-
     const offset: usize = @intCast(offset_c);
+    const packed_fi: *FuseFileInfo = @alignCast(@ptrCast(fi.?));
 
-    std.log.debug("Write {s} {} {}", .{ c_path, buf_size, offset });
+    std.log.debug("Write {s} {} {} fh:{}", .{ c_path, buf_size, offset, packed_fi.fh });
     const path = std.mem.span(c_path);
     if (file_buffers.get(path)) |file_buf| {
-         file_buf.write(buf[0..buf_size], offset) catch unreachable;
+        if (file_buf.read_only) {
+            std.log.warn("Writing to read only buffer: {s}", .{c_path});
+            return -1;
+        }
+        file_buf.write(buf[0..buf_size], offset) catch unreachable;
     }
+
+    _ = update_modtime(path) catch unreachable;
     return @intCast(buf_size);
 }
 
