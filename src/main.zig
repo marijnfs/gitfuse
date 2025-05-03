@@ -1,8 +1,8 @@
 const std = @import("std");
 const fuse = @cImport({
     @cDefine("FUSE_USE_VERSION", "31");
-    @cInclude("fuse_wrapper.h");
-    // @cInclude("");
+    // @cInclude("fuse_wrapper.h");
+    @cInclude("fuse3/fuse.h");
 });
 const git = @cImport({
     @cInclude("git2.h");
@@ -13,7 +13,56 @@ const zli = @import("zli");
 var repo: *git.git_repository = undefined;
 const ally = std.heap.c_allocator;
 
-var file_buffers: std.StringHashMap(*std.ArrayList(u8)) = undefined;
+const FileBuffer = struct {
+    buffer: std.ArrayList(u8),
+    read_only: bool,
+
+    pub fn contents(self: *FileBuffer) [] u8 {
+        return self.buffer.items;
+    }
+
+    pub fn size(self: *FileBuffer) usize {
+        return self.buffer.items.len;
+    }
+
+    pub fn write(self: *FileBuffer, buffer: []const u8, offset: usize ) !void {
+        const total = buffer.len + offset;
+        if (total > self.buffer.items.len) {
+            try self.buffer.ensureTotalCapacityPrecise(total);
+            self.buffer.expandToCapacity();
+        }
+
+        std.log.debug("after grow: {s}", .{buffer});
+        @memcpy(self.contents()[offset .. offset + buffer.len], buffer);
+    }
+
+    fn init(allocator: std.mem.Allocator, read_only: bool) !*FileBuffer {
+        const file_buffer = try allocator.create(FileBuffer);
+        file_buffer.* = .{
+            .buffer = std.ArrayList(u8).init(allocator),
+            .read_only = read_only,
+        };
+        return file_buffer;
+    }
+
+    fn init_buffer(allocator: std.mem.Allocator, buffer: []const u8, read_only: bool) !*FileBuffer {
+        const file_buffer = try allocator.create(FileBuffer);
+
+        const buffer_copy = try allocator.dupe(u8, buffer);
+        file_buffer.* = .{
+            .buffer = std.ArrayList(u8).fromOwnedSlice(allocator, buffer_copy),
+            .read_only = read_only,
+        };
+        return file_buffer;
+    }
+
+    pub fn deinit(self: *FileBuffer, allocator: std.mem.Allocator) void {
+        self.buffer.deinit();
+        allocator.destroy(self);
+    }
+};
+
+var file_buffers: std.StringHashMap(*FileBuffer) = undefined;
 var fd_counter: u64 = 0;
 
 fn git_try(err_code: c_int) !void {
@@ -92,7 +141,7 @@ const repo_path = "/home/marijnfs/tmp/gitfuse.git";
 pub fn init() !void {
     _ = git.git_libgit2_init();
 
-    file_buffers = std.StringHashMap(*std.ArrayList(u8)).init(ally);
+    file_buffers = std.StringHashMap(*FileBuffer).init(ally);
     {
         var repo_tmp: ?*git.git_repository = null;
         try git_try(git.git_repository_open(&repo_tmp, repo_path));
@@ -193,8 +242,9 @@ pub fn persist_file_buffer(path: []const u8) !void {
     if (file_buffers.get(path)) |buffer| {
         // First we create the blob and get the oid
         var buffer_oid = std.mem.zeroes(git.git_oid);
-        std.log.debug("Saving buffer: '{s}'", .{buffer.items});
-        try git_try(git.git_blob_create_from_buffer(&buffer_oid, repo, buffer.items.ptr, buffer.items.len));
+        std.log.debug("Saving buffer: '{s}'", .{buffer.contents()});
+        const buffer_data = buffer.contents();
+        try git_try(git.git_blob_create_from_buffer(&buffer_oid, repo, buffer_data.ptr, buffer_data.len));
 
         std.log.debug("Oid: {}", .{buffer_oid});
 
@@ -399,7 +449,7 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
     if (file_buffers.get(path)) |buffer| {
         stat.st_mode = fuse.S_IFREG | 0o0644;
         stat.st_nlink = 1;
-        stat.st_size = @intCast(buffer.items.len);
+        stat.st_size = @intCast(buffer.size());
         return 0;
     }
 
@@ -437,11 +487,14 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
     // const fi_direct = fitmp.*;
     const direct_ptr: *c_int = @ptrCast(@alignCast(fi.?));
     const fi_flags = direct_ptr.*;
-    const truncate = (fi_flags | fuse.O_TRUNC) > 0;
-    const access = fi_flags | fuse.O_ACCMODE;
+    const trunc = (fi_flags | fuse.O_TRUNC) > 0;
+    const access = fi_flags & fuse.O_ACCMODE;
+    const append = access == fuse.O_APPEND;
+    const write_only = access == fuse.O_WRONLY;
+    const read_only = access == fuse.O_RDONLY;
+    const read_write = access == fuse.O_RDWR;
     //O_RDONLY = 32768. O_WRONLY=32769. O_RDWR = 32770. O_APPEND = 33792
-    const readonly = access == fuse.O_RDONLY;
-    std.log.info("Truncate trunc:{} acc:{} ro:{}", .{ truncate, access, readonly });
+    std.log.info("truncate trunc:{} acc:{} ro:{} wo:{} rw:{} append:{}", .{ trunc, access, read_only, write_only, read_write, append });
     // fi.?.direct_io = 1;
 
     // bitfields don't work for zig 0.13, so we use the path for now
@@ -474,13 +527,11 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
     }
     const content_ptr: [*c]const u8 = @ptrCast(content_c.?);
     const size = git.git_blob_rawsize(blob);
-
     const content = content_ptr[0..size];
-    const buffer_copy = ally.dupe(u8, content) catch unreachable;
-    std.log.debug("Putting path '{s}', size: {}", .{ path, buffer_copy.len });
 
-    const new_buf = ally.create(std.ArrayList(u8)) catch unreachable;
-    new_buf.* = std.ArrayList(u8).fromOwnedSlice(ally, buffer_copy);
+    std.log.debug("Putting path '{s}', size: {}", .{ path, content.len });
+
+    const new_buf =  FileBuffer.init_buffer(ally, content, read_only) catch unreachable;
 
     const key = ally.dupe(u8, path) catch unreachable;
     file_buffers.put(key, new_buf) catch unreachable;
@@ -496,8 +547,8 @@ pub fn release(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_i
 
     persist_file_buffer(path) catch unreachable;
 
-    if (file_buffers.get(path)) |list| {
-        list.deinit();
+    if (file_buffers.get(path)) |buffer| {
+        buffer.deinit(ally);
         _ = file_buffers.remove(path);
     }
     _ = fi;
@@ -510,8 +561,9 @@ pub fn create(c_path: [*c]const u8, mode: fuse.mode_t, fi: ?*fuse.fuse_file_info
 
     std.log.debug("Create {s}", .{c_path});
 
-    const new_buf = ally.create(std.ArrayList(u8)) catch unreachable;
-    new_buf.* = std.ArrayList(u8).init(ally);
+
+    const read_only = false;
+    const new_buf = FileBuffer.init(ally, read_only) catch unreachable;
     const key = ally.dupe(u8, std.mem.span(c_path)) catch unreachable;
     file_buffers.put(key, new_buf) catch unreachable;
 
@@ -536,6 +588,11 @@ pub fn fsync(c_path: [*c]const u8, sync: c_int, fi: ?*fuse.fuse_file_info) callc
     return 0;
 }
 
+pub fn truncate(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    _ = fi;
+    std.log.debug("truncate {s}", .{c_path});
+}
+
 pub fn write(c_path: [*c]const u8, buf: [*c]const u8, buf_size: usize, offset_c: fuse.off_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;
 
@@ -544,18 +601,7 @@ pub fn write(c_path: [*c]const u8, buf: [*c]const u8, buf_size: usize, offset_c:
     std.log.debug("Write {s} {} {}", .{ c_path, buf_size, offset });
     const path = std.mem.span(c_path);
     if (file_buffers.get(path)) |file_buf| {
-        const minimum_size: usize = offset + buf_size;
-
-        std.log.debug("before grow: {s}", .{file_buf.items});
-        if (minimum_size > file_buf.items.len) {
-            std.log.debug("Growing to from {} to {}", .{ file_buf.items.len, minimum_size });
-            file_buf.ensureTotalCapacityPrecise(minimum_size) catch unreachable;
-            file_buf.expandToCapacity();
-        }
-
-        std.log.debug("after grow: {s}", .{file_buf.items});
-        @memcpy(file_buf.items[offset .. offset + buf_size], buf[0..buf_size]);
-        std.log.debug("after copy: {s}", .{file_buf.items});
+         file_buf.write(buf[0..buf_size], offset) catch unreachable;
     }
     return @intCast(buf_size);
 }
@@ -575,14 +621,14 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
         std.log.debug("it '{s}'", .{key.*});
     }
 
-    if (file_buffers.get(path)) |list| {
-        const buffer = list.items;
+    if (file_buffers.get(path)) |buffer| {
+        const contents = buffer.contents();
         var copy_size = buf_size;
-        if (offset + copy_size >= buffer.len) {
-            copy_size = buffer.len - offset;
+        if (offset + copy_size >= contents.len) {
+            copy_size = contents.len - offset;
         }
-        @memcpy(buf[0..copy_size], buffer[offset .. offset + copy_size]);
-        std.log.debug("sizes: copy{} off{} total{}", .{ copy_size, offset, buffer.len });
+        @memcpy(buf[0..copy_size], contents[offset .. offset + copy_size]);
+        std.log.debug("sizes: copy{} off{} total{}", .{ copy_size, offset, contents.len });
 
         return @intCast(copy_size);
     }
