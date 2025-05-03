@@ -80,7 +80,6 @@ pub fn get_object(path: []const u8) !*git.git_object {
         if (entry_type != git.GIT_OBJ_TREE) {
             return error.ExpectedTree;
         }
-
         try git_try(git.git_tree_lookup(&current_tree, repo, oid));
     }
 
@@ -95,10 +94,7 @@ pub fn init() !void {
     file_buffers = std.StringHashMap(*std.ArrayList(u8)).init(ally);
     {
         var repo_tmp: ?*git.git_repository = null;
-        const err = git.git_repository_open(&repo_tmp, repo_path);
-        if (err < 0) {
-            return error.Failed;
-        }
+        try git_try(git.git_repository_open(&repo_tmp, repo_path));
         repo = repo_tmp.?;
     }
 }
@@ -196,7 +192,10 @@ pub fn persist_file_buffer(path: []const u8) !void {
     if (file_buffers.get(path)) |buffer| {
         // First we create the blob and get the oid
         var buffer_oid = std.mem.zeroes(git.git_oid);
-        try git_try(git.git_blob_create_from_buffer(&buffer_oid, repo, @ptrCast(&buffer.items), buffer.items.len));
+        std.log.debug("Saving buffer: '{s}'", .{buffer.items});
+        try git_try(git.git_blob_create_from_buffer(&buffer_oid, repo, buffer.items.ptr, buffer.items.len));
+
+        std.log.debug("Oid: {}", .{buffer_oid});
 
         // Grab our active target tree and setup the builder
         const active_tree = try get_active_tree();
@@ -430,7 +429,13 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
 }
 
 pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
-    _ = fi;
+    // _ = fi;
+    //
+
+    const fitmp = fi.?;
+    const fi_direct = fitmp.*;
+    const truncate = fi_direct.flags | fuse.O_TRUNC;
+    std.log.info("Truncate {}", .{truncate});
     // fi.?.direct_io = 1;
 
     // bitfields don't work for zig 0.13, so we use the path for now
