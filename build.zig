@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
     });
 
     lib.addIncludePath(b.path("c-src")); // Look for C source files
+    
     lib.linkLibC();
 
     // This declares intent for the library to be installed into the standard
@@ -38,6 +39,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe.addIncludePath(b.path("c-src"));
     exe.linkLibC();
     exe.linkSystemLibrary("fuse3");
     exe.linkSystemLibrary("git2");

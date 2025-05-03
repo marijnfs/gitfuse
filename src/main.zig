@@ -1,7 +1,8 @@
 const std = @import("std");
 const fuse = @cImport({
     @cDefine("FUSE_USE_VERSION", "31");
-    @cInclude("fuse3/fuse.h");
+    @cInclude("fuse_wrapper.h");
+    // @cInclude("");
 });
 const git = @cImport({
     @cInclude("git2.h");
@@ -27,7 +28,7 @@ pub fn get_dir(path: []const u8) !*git.git_tree {
     const tree = try get_active_tree();
 
     var current_tree: ?*git.git_tree = tree;
-    var it = std.mem.tokenize(u8, path, "/");
+    var it = std.mem.tokenizeSequence(u8, path, "/");
 
     while (it.next()) |subpath| {
         const subpath_z = try ally.dupeZ(u8, subpath);
@@ -54,7 +55,7 @@ pub fn get_object(path: []const u8) !*git.git_object {
     const tree = try get_active_tree();
 
     var current_tree: ?*git.git_tree = tree;
-    var it = std.mem.tokenize(u8, path, "/");
+    var it = std.mem.tokenizeSequence(u8, path, "/");
 
     while (it.next()) |subpath| {
         const subpath_z = try ally.dupeZ(u8, subpath);
@@ -204,7 +205,7 @@ pub fn persist_file_buffer(path: []const u8) !void {
         // Find the sequence of trees to the path
         var trees = std.ArrayList(*git.git_tree).init(ally);
         var paths = std.ArrayList([]const u8).init(ally);
-        var it = std.mem.tokenize(u8, path, "/");
+        var it = std.mem.tokenizeSequence(u8, path, "/");
 
         var current_tree: ?*git.git_tree = active_tree;
 
@@ -431,11 +432,16 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
 pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     // _ = fi;
     //
-
-    const fitmp = fi.?;
-    const fi_direct = fitmp.*;
-    const truncate = fi_direct.flags | fuse.O_TRUNC;
-    std.log.info("Truncate {}", .{truncate});
+    // const fi_flags = git.fuse_file_info_flags(fi.?);
+    // const fitmp = fi.?;
+    // const fi_direct = fitmp.*;
+    const direct_ptr: *c_int = @ptrCast(@alignCast(fi.?));
+    const fi_flags = direct_ptr.*;
+    const truncate = (fi_flags | fuse.O_TRUNC) > 0;
+    const access = fi_flags | fuse.O_ACCMODE;
+    //O_RDONLY = 32768. O_WRONLY=32769. O_RDWR = 32770. O_APPEND = 33792
+    const readonly = access == fuse.O_RDONLY;
+    std.log.info("Truncate trunc:{} acc:{} ro:{}", .{ truncate, access, readonly });
     // fi.?.direct_io = 1;
 
     // bitfields don't work for zig 0.13, so we use the path for now
@@ -540,12 +546,16 @@ pub fn write(c_path: [*c]const u8, buf: [*c]const u8, buf_size: usize, offset_c:
     if (file_buffers.get(path)) |file_buf| {
         const minimum_size: usize = offset + buf_size;
 
+        std.log.debug("before grow: {s}", .{file_buf.items});
         if (minimum_size > file_buf.items.len) {
-            file_buf.ensureTotalCapacity(minimum_size) catch unreachable;
+            std.log.debug("Growing to from {} to {}", .{ file_buf.items.len, minimum_size });
+            file_buf.ensureTotalCapacityPrecise(minimum_size) catch unreachable;
             file_buf.expandToCapacity();
         }
 
+        std.log.debug("after grow: {s}", .{file_buf.items});
         @memcpy(file_buf.items[offset .. offset + buf_size], buf[0..buf_size]);
+        std.log.debug("after copy: {s}", .{file_buf.items});
     }
     return @intCast(buf_size);
 }
