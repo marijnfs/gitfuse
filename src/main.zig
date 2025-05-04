@@ -10,8 +10,14 @@ const git = @cImport({
 
 const zli = @import("zli");
 
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+const ally = debug_allocator.allocator();
+
+var global_arena = std.heap.ArenaAllocator.init(ally);
+const ally_arena = global_arena.allocator();
+// const ally = std.heap.c_allocator;
+
 var repo: *git.git_repository = undefined;
-const ally = std.heap.c_allocator;
 
 const FuseFileInfo = packed struct {
     flags: i32,
@@ -177,9 +183,15 @@ pub fn init() !void {
 }
 
 pub fn deinit() void {
+    std.log.info("Closing application", .{});
     _ = git.git_libgit2_shutdown();
 
     git.git_repository_free(repo);
+    file_buffers.deinit();
+    mod_times.deinit();
+
+    global_arena.deinit();
+    _ = debug_allocator.deinit();
 }
 
 pub fn create_commit(tree: *git.git_tree, parent: *git.git_commit, reference_opt: ?[]const u8) !git.git_oid {
@@ -204,6 +216,7 @@ pub fn create_commit(tree: *git.git_tree, parent: *git.git_commit, reference_opt
 
     if (reference_opt) |reference| {
         const reference_c = try ally.dupeZ(u8, reference);
+        defer ally.free(reference_c);
 
         var git_reference: ?*git.git_reference = null;
         const force = 1;
@@ -273,7 +286,7 @@ pub fn persist_file_buffer(path: []const u8) !void {
 
         // First we create the blob and get the oid
         var buffer_oid = std.mem.zeroes(git.git_oid);
-        
+
         const buffer_data = buffer.contents();
         try git_try(git.git_blob_create_from_buffer(&buffer_oid, repo, buffer_data.ptr, buffer_data.len));
 
@@ -284,6 +297,9 @@ pub fn persist_file_buffer(path: []const u8) !void {
         // Find the sequence of trees to the path
         var trees = std.ArrayList(*git.git_tree).init(ally);
         var paths = std.ArrayList([]const u8).init(ally);
+        defer trees.deinit();
+        defer paths.deinit();
+        
         var it = std.mem.tokenizeSequence(u8, path, "/");
 
         var current_tree: ?*git.git_tree = active_tree;
@@ -324,6 +340,8 @@ pub fn persist_file_buffer(path: []const u8) !void {
             const tree = trees.items[i];
             const subpath = paths.items[i];
             const subpath_c = try ally.dupeZ(u8, subpath);
+            defer ally.free(subpath_c);
+
             var builder: ?*git.git_treebuilder = null;
             try git_try(git.git_treebuilder_new(&builder, repo, tree));
             defer git.git_treebuilder_free(builder);
@@ -363,7 +381,7 @@ pub fn update_modtime(path: []const u8) !i64 {
         return cur;
     }
 
-    try mod_times.put(try ally.dupe(u8, path), cur);
+    try mod_times.put(try ally_arena.dupe(u8, path), cur);
     return cur;
 }
 
@@ -373,7 +391,7 @@ pub fn get_modtime(path: []const u8) !i64 {
     }
 
     const cur = std.time.timestamp();
-    try mod_times.put(try ally.dupe(u8, path), cur);
+    try mod_times.put(try ally_arena.dupe(u8, path), cur);
     return cur;
 }
 
@@ -389,12 +407,12 @@ pub fn list_git_dir(tree: *git.git_tree) void {
 pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
 
-    var args = std.ArrayList([:0]u8).init(ally);
+    var args = std.ArrayList([:0]u8).init(ally_arena);
     {
-        var iterator = try std.process.argsWithAllocator(ally);
+        var iterator = try std.process.argsWithAllocator(ally_arena);
         while (iterator.next()) |arg| {
             std.log.info("adding {s}", .{arg});
-            try args.append(try ally.dupeZ(u8, arg));
+            try args.append(try ally_arena.dupeZ(u8, arg));
         }
     }
 
@@ -413,7 +431,7 @@ pub fn main() !void {
         .write = &write,
     };
 
-    var c_strings = try ally.alloc([*c]u8, args.items.len + 1);
+    var c_strings = try ally_arena.alloc([*c]u8, args.items.len + 1);
     for (0..args.items.len) |i| {
         c_strings[i] = args.items[i];
     }
@@ -583,7 +601,7 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
         new_buf.truncate();
     }
 
-    const key = ally.dupe(u8, path) catch unreachable;
+    const key = ally_arena.dupe(u8, path) catch unreachable;
     file_buffers.put(key, new_buf) catch unreachable;
 
     return 0;
@@ -611,7 +629,7 @@ pub fn create(c_path: [*c]const u8, mode: fuse.mode_t, fi: ?*fuse.fuse_file_info
 
     const read_only = false;
     const new_buf = FileBuffer.init(ally, read_only) catch unreachable;
-    const key = ally.dupe(u8, std.mem.span(c_path)) catch unreachable;
+    const key = ally_arena.dupe(u8, std.mem.span(c_path)) catch unreachable;
     file_buffers.put(key, new_buf) catch unreachable;
 
     return 0;
