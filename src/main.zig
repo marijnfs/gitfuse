@@ -55,7 +55,6 @@ const FileBuffer = struct {
             self.buffer.expandToCapacity();
         }
 
-        std.log.debug("after grow: {s}", .{buffer});
         @memcpy(self.contents()[offset .. offset + buffer.len], buffer);
     }
 
@@ -114,7 +113,6 @@ pub fn get_dir(path: []const u8) !*git.git_tree {
         const entry = git.git_tree_entry_byname(current_tree, subpath_z);
         if (entry == null)
             return error.NotFound;
-        std.debug.print("found: {any}\n", .{entry});
 
         const entry_type = git.git_tree_entry_type(entry);
         if (entry_type != git.GIT_OBJ_TREE) {
@@ -141,7 +139,6 @@ pub fn get_object(path: []const u8) !*git.git_object {
         const entry = git.git_tree_entry_byname(current_tree, subpath_z);
         if (entry == null)
             return error.NotFound;
-        std.debug.print("found: {any}\n", .{entry});
 
         const entry_type = git.git_tree_entry_type(entry);
         const oid = git.git_tree_entry_id(entry);
@@ -276,11 +273,9 @@ pub fn persist_file_buffer(path: []const u8) !void {
 
         // First we create the blob and get the oid
         var buffer_oid = std.mem.zeroes(git.git_oid);
-        std.log.debug("Saving buffer: '{s}'", .{buffer.contents()});
+        
         const buffer_data = buffer.contents();
         try git_try(git.git_blob_create_from_buffer(&buffer_oid, repo, buffer_data.ptr, buffer_data.len));
-
-        std.log.debug("Oid: {}", .{buffer_oid});
 
         // Grab our active target tree and setup the builder
         const active_tree = try get_active_tree();
@@ -299,12 +294,6 @@ pub fn persist_file_buffer(path: []const u8) !void {
 
             const last_comparison = it.peek() == null;
             if (last_comparison) {
-                // var obj_c: ?*git.git_object = null;
-                // try git_try(git.git_object_lookup(&obj_c, repo, sub_oid, git.GIT_OBJECT_ANY));
-                // if (obj_c == null) {
-                //     return error.FailedLookup;
-                // }
-
                 // We are on the last level and found the file
                 break;
             }
@@ -313,10 +302,8 @@ pub fn persist_file_buffer(path: []const u8) !void {
             defer ally.free(subpath_z);
 
             const entry = git.git_tree_entry_byname(current_tree, subpath_z);
-            std.log.debug("entry: {s}", .{subpath_z});
             if (entry == null)
                 return error.NotFound;
-            std.debug.print("found: {any}\n", .{entry});
 
             const entry_type = git.git_tree_entry_type(entry);
             const sub_oid = git.git_tree_entry_id(entry);
@@ -401,7 +388,6 @@ pub fn list_git_dir(tree: *git.git_tree) void {
 
 pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
 
     var args = std.ArrayList([:0]u8).init(ally);
     {
@@ -433,22 +419,11 @@ pub fn main() !void {
     }
     c_strings[args.items.len] = null;
     _ = fuse.fuse_main_fn(@intCast(args.items.len), @ptrCast(c_strings), &operations, null);
-
-    while (true) {
-        std.time.sleep(1000);
-    }
-    std.log.info("Done", .{});
-    // _ = fuse.fuse_main_real(@intCast(args.items.len), @ptrCast(c_strings), &operations, @sizeOf(@TypeOf(operations)), null);
 }
 
 pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir_t, offset: fuse.off_t, fi: ?*fuse.fuse_file_info, flags: fuse.fuse_readdir_flags) callconv(.C) c_int {
-    std.log.info("readdir: {s}", .{cpath});
+    std.log.debug("readdir: {s}", .{cpath});
     const path = std.mem.span(cpath);
-
-    //if (!std.mem.eql(u8, path, "/")) {
-    //    const ENOENT = 2;
-    //    return -ENOENT;
-    //}
 
     const path_tree = get_dir(path) catch unreachable;
 
@@ -476,7 +451,6 @@ pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir
                 @panic("Help");
             },
         }
-        std.log.info("entry: {s}", .{name});
     }
 
     _ = offset;
@@ -491,7 +465,7 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
         packed_fi = @alignCast(@ptrCast(fi_ptr));
     }
 
-    std.log.info("getattr: {s}", .{c_path});
+    std.log.debug("getattr: {s}", .{c_path});
 
     const path = std.mem.span(c_path);
     var stat = std.mem.zeroes(fuse.struct_stat);
@@ -559,15 +533,14 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
     // const fi_flags = direct_ptr.*;
     const trunc = (fi_flags & fuse.O_TRUNC) > 0;
     const access = fi_flags & fuse.O_ACCMODE;
-    const append = access == fuse.O_APPEND;
-    const write_only = access == fuse.O_WRONLY;
+    // const append = access == fuse.O_APPEND;
+    // const write_only = access == fuse.O_WRONLY;
     const read_only = access == fuse.O_RDONLY;
-    const read_write = access == fuse.O_RDWR;
+    // const read_write = access == fuse.O_RDWR;
 
     // _ = packed_fi;
-    std.log.info("Packed: {}", .{packed_fi});
     //O_RDONLY = 32768. O_WRONLY=32769. O_RDWR = 32770. O_APPEND = 33792
-    std.log.info("truncate trunc:{} acc:{} ro:{} wo:{} rw:{} append:{}", .{ trunc, access, read_only, write_only, read_write, append });
+    // std.log.info("truncate trunc:{} acc:{} ro:{} wo:{} rw:{} append:{}", .{ trunc, access, read_only, write_only, read_write, append });
     // fi.?.direct_io = 1;
 
     // bitfields don't work for zig 0.13, so we use the path for now
@@ -602,7 +575,7 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
     const size = git.git_blob_rawsize(blob);
     const content = content_ptr[0..size];
 
-    std.log.debug("Putting path '{s}', size: {}", .{ path, content.len });
+    std.log.debug("Persisting path '{s}', size: {}", .{ path, content.len });
 
     const new_buf = FileBuffer.init_buffer(ally, content, read_only) catch unreachable;
 
@@ -612,8 +585,6 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
 
     const key = ally.dupe(u8, path) catch unreachable;
     file_buffers.put(key, new_buf) catch unreachable;
-
-    std.log.debug("Done {}", .{file_buffers.count()});
 
     return 0;
 }
@@ -666,7 +637,7 @@ pub fn fsync(c_path: [*c]const u8, sync: c_int, fi: ?*fuse.fuse_file_info) callc
 
 pub fn truncate(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;
-    std.log.debug("truncate {s}", .{c_path});
+    std.log.debug("Truncate {s}", .{c_path});
 }
 
 pub fn write(c_path: [*c]const u8, buf: [*c]const u8, buf_size: usize, offset_c: fuse.off_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
@@ -695,9 +666,7 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
     const path = std.mem.span(c_path);
     const offset: usize = @intCast(offset_c);
 
-    std.log.debug("buf count {}", .{file_buffers.count()});
     var it = file_buffers.keyIterator();
-    std.log.debug("has {}", .{file_buffers.contains(path)});
     while (it.next()) |key| {
         std.log.debug("it '{s}'", .{key.*});
     }
@@ -709,10 +678,10 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
             copy_size = contents.len - offset;
         }
         @memcpy(buf[0..copy_size], contents[offset .. offset + copy_size]);
-        std.log.debug("sizes: copy{} off{} total{}", .{ copy_size, offset, contents.len });
 
         return @intCast(copy_size);
     }
+
     std.log.debug("path not found '{s}'", .{path});
     const ENOENT = 2;
     return -ENOENT;
