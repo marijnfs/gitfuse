@@ -10,8 +10,12 @@ const git = @cImport({
 
 const zli = @import("zli");
 
+// Debug mode
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-const ally = debug_allocator.allocator();
+// const ally = debug_allocator.allocator();
+
+// Fast mode
+const ally = std.heap.smp_allocator;
 
 var global_arena = std.heap.ArenaAllocator.init(ally);
 const ally_arena = global_arena.allocator();
@@ -299,7 +303,7 @@ pub fn persist_file_buffer(path: []const u8) !void {
         var paths = std.ArrayList([]const u8).init(ally);
         defer trees.deinit();
         defer paths.deinit();
-        
+
         var it = std.mem.tokenizeSequence(u8, path, "/");
 
         var current_tree: ?*git.git_tree = active_tree;
