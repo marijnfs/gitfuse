@@ -8,7 +8,7 @@ const git = @cImport({
     @cInclude("git2.h");
 });
 
-const zli = @import("zli");
+const zargs = @import("zargs");
 
 // Debug mode
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
@@ -23,80 +23,9 @@ const ally_arena = global_arena.allocator();
 
 var repo: *git.git_repository = undefined;
 
-const FuseFileInfo = packed struct {
-    flags: i32,
-    writepage: bool,
-    direct_io: bool,
-    keep_cache: bool,
-    flush: bool,
-    nonseekable: bool,
-    flock_release: bool,
-    cache_readdir: bool,
-    noflush: bool,
-    parallel_direct_writes: bool,
-    padding: u23,
-    padding2: u32,
-    padding3: u32,
-    fh: u64,
-    lock_owner: u64,
-    poll_events: u32,
-    backing_id: u32,
-    compat_flags: u64,
-    reserved: u64,
-    reserved2: u64,
-};
+const FuseFileInfo = @import("fusefileinfo.zig").FuseFileInfo;
 
-const FileBuffer = struct {
-    buffer: std.ArrayList(u8),
-    read_only: bool,
-
-    pub fn contents(self: *FileBuffer) []u8 {
-        return self.buffer.items;
-    }
-
-    pub fn size(self: *FileBuffer) usize {
-        return self.buffer.items.len;
-    }
-
-    pub fn write(self: *FileBuffer, buffer: []const u8, offset: usize) !void {
-        const total = buffer.len + offset;
-        if (total > self.buffer.items.len) {
-            try self.buffer.ensureTotalCapacityPrecise(total);
-            self.buffer.expandToCapacity();
-        }
-
-        @memcpy(self.contents()[offset .. offset + buffer.len], buffer);
-    }
-
-    pub fn truncate(self: *FileBuffer) void {
-        self.buffer.clearAndFree();
-    }
-
-    fn init(allocator: std.mem.Allocator, read_only: bool) !*FileBuffer {
-        const file_buffer = try allocator.create(FileBuffer);
-        file_buffer.* = .{
-            .buffer = std.ArrayList(u8).init(allocator),
-            .read_only = read_only,
-        };
-        return file_buffer;
-    }
-
-    fn init_buffer(allocator: std.mem.Allocator, buffer: []const u8, read_only: bool) !*FileBuffer {
-        const file_buffer = try allocator.create(FileBuffer);
-
-        const buffer_copy = try allocator.dupe(u8, buffer);
-        file_buffer.* = .{
-            .buffer = std.ArrayList(u8).fromOwnedSlice(allocator, buffer_copy),
-            .read_only = read_only,
-        };
-        return file_buffer;
-    }
-
-    pub fn deinit(self: *FileBuffer, allocator: std.mem.Allocator) void {
-        self.buffer.deinit();
-        allocator.destroy(self);
-    }
-};
+const FileBuffer = @import("filebuffer.zig");
 
 var file_buffers: std.StringHashMap(*FileBuffer) = undefined;
 var mod_times: std.StringHashMap(i64) = undefined;
@@ -110,6 +39,7 @@ fn git_try(err_code: c_int) !void {
     }
 }
 
+// get tree in active repository, corresponding to path
 pub fn get_dir(path: []const u8) !*git.git_tree {
     const tree = try get_active_tree();
 
@@ -136,6 +66,7 @@ pub fn get_dir(path: []const u8) !*git.git_tree {
     return current_tree.?;
 }
 
+// get object from active repository, corresponding to path
 pub fn get_object(path: []const u8) !*git.git_object {
     const tree = try get_active_tree();
 
@@ -171,15 +102,13 @@ pub fn get_object(path: []const u8) !*git.git_object {
     return error.NotFound;
 }
 
-const repo_path = "/home/marijnfs/tmp/gitfuse.git";
-
-pub fn init() !void {
+pub fn init(repository_path: []const u8) !void {
     _ = git.git_libgit2_init();
 
     file_buffers = std.StringHashMap(*FileBuffer).init(ally);
     {
         var repo_tmp: ?*git.git_repository = null;
-        try git_try(git.git_repository_open(&repo_tmp, repo_path));
+        try git_try(git.git_repository_open(&repo_tmp, try ally_arena.dupeZ(u8, repository_path)));
         repo = repo_tmp.?;
     }
 
@@ -409,18 +338,20 @@ pub fn list_git_dir(tree: *git.git_tree) void {
 }
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
+    const cmd = zargs.Command.new("GitFuse")
+        .about("GitFuse -- Mount your Git repository like a filesystem.")
+        .author("Marijn Stollenga")
+        .homepage("")
+        .optArg("repository", []const u8, .{ .short = 'r', .long = "repository" })
+        .optArg("mount", []const u8, .{ .short = 'm', .long = "mount" });
 
-    var args = std.ArrayList([:0]u8).init(ally_arena);
-    {
-        var iterator = try std.process.argsWithAllocator(ally_arena);
-        while (iterator.next()) |arg| {
-            std.log.info("adding {s}", .{arg});
-            try args.append(try ally_arena.dupeZ(u8, arg));
-        }
-    }
+    const args = cmd.parse(ally) catch |e|
+        zargs.exitf(e, 1, "\n{s}\n", .{cmd.usage()});
+    defer cmd.destroy(&args, ally);
 
-    try init();
+    std.debug.print("Store log into {s}\n", .{args.repository});
+
+    try init(args.repository);
     defer deinit();
 
     const operations: fuse.fuse_operations = .{
@@ -435,12 +366,15 @@ pub fn main() !void {
         .write = &write,
     };
 
-    var c_strings = try ally_arena.alloc([*c]u8, args.items.len + 1);
-    for (0..args.items.len) |i| {
-        c_strings[i] = args.items[i];
-    }
-    c_strings[args.items.len] = null;
-    _ = fuse.fuse_main_fn(@intCast(args.items.len), @ptrCast(c_strings), &operations, null);
+    var fuse_args = std.ArrayList(?[:0]u8).init(ally_arena);
+    try fuse_args.append(try ally_arena.dupeZ(u8, "<program>"));
+
+    // var c_strings = try ally_arena.alloc([*c]u8, args.items.len + 1);
+    // for (0..args.items.len) |i| {
+    //     c_strings[i] = args.items[i];
+    // }
+    // c_strings[args.items.len] = null;
+    _ = fuse.fuse_main_fn(@intCast(fuse_args.items.len), @ptrCast(&fuse_args.items), &operations, null);
 }
 
 pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir_t, offset: fuse.off_t, fi: ?*fuse.fuse_file_info, flags: fuse.fuse_readdir_flags) callconv(.C) c_int {

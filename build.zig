@@ -15,23 +15,10 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const lib = b.addStaticLibrary(.{
-        .name = "gitfuse",
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
+    const zargs_dep = b.dependency("zargs", .{
         .optimize = optimize,
+        .target = target,
     });
-
-    lib.addIncludePath(b.path("c-src")); // Look for C source files
-    
-    lib.linkLibC();
-
-    // This declares intent for the library to be installed into the standard
-    // location when the user invokes the "install" step (the default step when
-    // running `zig build`).
-    b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
         .name = "gitfuse",
@@ -39,10 +26,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
     exe.addIncludePath(b.path("c-src"));
     exe.linkLibC();
     exe.linkSystemLibrary("fuse3");
     exe.linkSystemLibrary("git2");
+
+    exe.root_module.addImport("zargs", zargs_dep.module("zargs"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
