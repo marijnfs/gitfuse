@@ -368,13 +368,18 @@ pub fn main() !void {
 
     var fuse_args = std.ArrayList(?[:0]u8).init(ally_arena);
     try fuse_args.append(try ally_arena.dupeZ(u8, "<program>"));
+    try fuse_args.append(try ally_arena.dupeZ(u8, args.mount));
+    try fuse_args.append(try ally_arena.dupeZ(u8, "-f"));
+    try fuse_args.append(try ally_arena.dupeZ(u8, "-s"));
 
-    // var c_strings = try ally_arena.alloc([*c]u8, args.items.len + 1);
-    // for (0..args.items.len) |i| {
-    //     c_strings[i] = args.items[i];
-    // }
-    // c_strings[args.items.len] = null;
-    _ = fuse.fuse_main_fn(@intCast(fuse_args.items.len), @ptrCast(&fuse_args.items), &operations, null);
+    // This seems necessary to pass arguments properly
+    var c_strings = try ally_arena.alloc([*c]u8, fuse_args.items.len);
+    for (0..fuse_args.items.len) |i| {
+        c_strings[i] = fuse_args.items[i].?;
+    }
+
+    // fuse_main is supposed to be called instead of fuse_main_fn, but it is a #define and not a proper function
+    _ = fuse.fuse_main_fn(@intCast(c_strings.len), @ptrCast(c_strings.ptr), &operations, null);
 }
 
 pub fn readdir(cpath: [*c]const u8, buf: ?*anyopaque, filler: fuse.fuse_fill_dir_t, offset: fuse.off_t, fi: ?*fuse.fuse_file_info, flags: fuse.fuse_readdir_flags) callconv(.C) c_int {
@@ -435,8 +440,6 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
     const ROOT = "/";
     if (std.mem.eql(u8, ROOT, path)) {
         stat.st_mode = fuse.S_IFDIR | 0o0755;
-        stat.st_nlink = 2;
-        // stbuf.?.* = stat;
         return 0;
     }
 
@@ -445,7 +448,6 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
         stat.st_mode = fuse.S_IFREG | 0o0644;
         stat.st_nlink = 1;
         stat.st_size = @intCast(buffer.size());
-        // stbuf.?.* = stat;
         return 0;
     }
 
@@ -471,16 +473,10 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
         return -ENOENT;
     }
 
-    // stbuf.?.* = stat;
     return 0;
 }
 
 pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
-    // _ = fi;
-    //
-    // const fi_flags = git.fuse_file_info_flags(fi.?);
-    // const fitmp = fi.?;
-    // const fi_direct = fitmp.*;
     const packed_fi: *FuseFileInfo = @alignCast(@ptrCast(fi.?));
     packed_fi.fh = 123;
 
@@ -494,12 +490,7 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
     const read_only = access == fuse.O_RDONLY;
     // const read_write = access == fuse.O_RDWR;
 
-    // _ = packed_fi;
-    //O_RDONLY = 32768. O_WRONLY=32769. O_RDWR = 32770. O_APPEND = 33792
-    // std.log.info("truncate trunc:{} acc:{} ro:{} wo:{} rw:{} append:{}", .{ trunc, access, read_only, write_only, read_write, append });
-    // fi.?.direct_io = 1;
-
-    // bitfields don't work for zig 0.13, so we use the path for now
+    //Access codes: O_RDONLY = 32768. O_WRONLY=32769. O_RDWR = 32770. O_APPEND = 33792
 
     std.log.debug("Opening {s}", .{c_path});
 
