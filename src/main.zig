@@ -308,7 +308,7 @@ pub fn persist_file_buffer(path: []const u8) !void {
 
 pub fn remove_file(path: []const u8) !void {
     std.log.debug("Persisting: {s}", .{path});
-    
+
     // Grab our active target tree and setup the builder
     const active_tree = try get_active_tree();
     const reference = try get_reference();
@@ -371,7 +371,6 @@ pub fn remove_file(path: []const u8) !void {
             try git_try(git.git_treebuilder_remove(builder, subpath_c));
         } else {
             try git_try(git.git_treebuilder_insert(null, builder, subpath_c, &new_oid, oid_mode));
-            
         }
         var tree_oid: git.git_oid = undefined;
         try git_try(git.git_treebuilder_write(&tree_oid, builder));
@@ -565,9 +564,19 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
     return 0;
 }
 
+pub fn get_blob_content(blob: *git.git_blob) []const u8 {
+    const content_c = git.git_blob_rawcontent(blob);
+    if (content_c == null) {
+        error.NoContent;
+    }
+    const content_ptr: [*c]const u8 = @ptrCast(content_c.?);
+    const size = git.git_blob_rawsize(blob);
+    return content_ptr[0..size];
+}
+
 pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     const packed_fi: *FuseFileInfo = @alignCast(@ptrCast(fi.?));
-    packed_fi.fh = 123;
+    packed_fi.fh = 123; //TODO: use fh for buffers
 
     const fi_flags = packed_fi.flags;
     // const direct_ptr: *c_int = @ptrCast(@alignCast(fi.?));
@@ -585,6 +594,11 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
 
     const path = std.mem.span(c_path);
 
+    if (file_buffers.get(path)) |buffer| {
+        std.log.debug("Opening existing buffer", .{});
+        buffer.n_readers += 1;
+    }
+
     const object = get_object(path) catch {
         std.log.debug("read: no object: {s}", .{path});
         const ENOENT = 2;
@@ -600,16 +614,11 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
 
     const blob: *git.git_blob = @ptrCast(object);
     defer git.git_blob_free(blob);
-
-    const content_c = git.git_blob_rawcontent(blob);
-    if (content_c == null) {
+    const content = get_blob_content() catch {
         std.log.debug("blob has no content: {s}", .{path});
         const ENOENT = 2;
         return -ENOENT;
-    }
-    const content_ptr: [*c]const u8 = @ptrCast(content_c.?);
-    const size = git.git_blob_rawsize(blob);
-    const content = content_ptr[0..size];
+    };
 
     std.log.debug("Opening existing file '{s}', size: {}", .{ path, content.len });
 
@@ -629,11 +638,18 @@ pub fn release(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_i
     std.log.debug("Release {s}", .{c_path});
     const path = std.mem.span(c_path);
 
-    persist_file_buffer(path) catch unreachable;
+    persist_file_buffer(path) catch {
+        std.log.warn("Buffer not found during release", .{});
+        return 0;
+    };
 
     if (file_buffers.get(path)) |buffer| {
-        buffer.deinit(ally);
-        _ = file_buffers.remove(path);
+        if (buffer.last_reader()) {
+            buffer.deinit(ally);
+            _ = file_buffers.remove(path);
+        } else {
+            buffer.n_readers -= 1;
+        }
     }
     _ = fi;
     return 0;
@@ -655,9 +671,7 @@ pub fn create(c_path: [*c]const u8, mode: fuse.mode_t, fi: ?*fuse.fuse_file_info
 
 pub fn flush(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;
-    // const path = std.mem.span(c_path);
     std.log.debug("Flush {s}", .{c_path});
-    // persist_file_buffer(path) catch unreachable;
     return 0;
 }
 
@@ -721,5 +735,12 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
 pub fn unlink(c_path: [*c]const u8) callconv(.C) c_int {
     const path = std.mem.span(c_path);
     remove_file(path) catch unreachable;
+    return 0;
+}
+
+pub fn rename(c_src_path: [*c]const u8, c_dest_path: [*c]const u8, flag: c_uint) callconv(.C) c_int {
+    const src_path = std.mem.span(c_src_path);
+    const dest_path = std.mem.span(c_dest_path);
+
     return 0;
 }

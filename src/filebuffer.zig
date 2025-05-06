@@ -4,6 +4,7 @@ const Self = @This();
 
 buffer: std.ArrayList(u8),
 read_only: bool,
+n_readers: usize = 1,
 
 pub fn contents(self: *Self) []u8 {
     return self.buffer.items;
@@ -11,6 +12,10 @@ pub fn contents(self: *Self) []u8 {
 
 pub fn size(self: *Self) usize {
     return self.buffer.items.len;
+}
+
+pub fn last_reader(self: *Self) bool {
+    return self.n_readers == 1;
 }
 
 pub fn write(self: *Self, buffer: []const u8, offset: usize) !void {
