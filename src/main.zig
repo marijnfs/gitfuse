@@ -306,6 +306,94 @@ pub fn persist_file_buffer(path: []const u8) !void {
     std.log.debug("Done Persisting: {s}", .{path});
 }
 
+pub fn remove_file(path: []const u8) !void {
+    std.log.debug("Persisting: {s}", .{path});
+    
+    // Grab our active target tree and setup the builder
+    const active_tree = try get_active_tree();
+    const reference = try get_reference();
+
+    // Find the sequence of trees to the path
+    var trees = std.ArrayList(*git.git_tree).init(ally);
+    var paths = std.ArrayList([]const u8).init(ally);
+    defer trees.deinit();
+    defer paths.deinit();
+
+    var it = std.mem.tokenizeSequence(u8, path, "/");
+
+    var current_tree: ?*git.git_tree = active_tree;
+
+    while (it.next()) |subpath| {
+        try trees.append(current_tree.?);
+        try paths.append(subpath);
+
+        const last_comparison = it.peek() == null;
+        if (last_comparison) {
+            // We are on the last level and found the file
+            break;
+        }
+
+        const subpath_z = try ally.dupeZ(u8, subpath);
+        defer ally.free(subpath_z);
+
+        const entry = git.git_tree_entry_byname(current_tree, subpath_z);
+        if (entry == null)
+            return error.NotFound;
+
+        const entry_type = git.git_tree_entry_type(entry);
+        const sub_oid = git.git_tree_entry_id(entry);
+
+        if (entry_type != git.GIT_OBJ_TREE) {
+            return error.ExpectedTree;
+        }
+
+        try git_try(git.git_tree_lookup(&current_tree, repo, sub_oid));
+    }
+
+    // Now recursively build up the updated tree
+    var i: usize = trees.items.len;
+    var new_oid: git.git_oid = undefined;
+    var oid_mode: git.git_filemode_t = git.GIT_FILEMODE_BLOB;
+    while (i > 0) {
+        i -= 1;
+        const tree = trees.items[i];
+        const subpath = paths.items[i];
+        const subpath_c = try ally.dupeZ(u8, subpath);
+        defer ally.free(subpath_c);
+
+        var builder: ?*git.git_treebuilder = null;
+        try git_try(git.git_treebuilder_new(&builder, repo, tree));
+        defer git.git_treebuilder_free(builder);
+
+        const deepest_tree = (i == trees.items.len - 1);
+        // on the deepest tree we remove the object, all other levels are updates of the trees, done with an overwriting insert
+        if (deepest_tree) {
+            try git_try(git.git_treebuilder_remove(builder, subpath_c));
+        } else {
+            try git_try(git.git_treebuilder_insert(null, builder, subpath_c, &new_oid, oid_mode));
+            
+        }
+        var tree_oid: git.git_oid = undefined;
+        try git_try(git.git_treebuilder_write(&tree_oid, builder));
+
+        new_oid = tree_oid;
+        oid_mode = git.GIT_FILEMODE_TREE;
+    }
+
+    // Now the new tree id is new_oid
+    // Set up the commit
+    const target_branch = "gitfuse";
+
+    const new_tree_oid = new_oid;
+
+    var new_tree: ?*git.git_tree = null;
+    try git_try(git.git_tree_lookup(&new_tree, repo, &new_tree_oid));
+    _ = try create_commit(
+        new_tree.?,
+        reference.commit,
+        target_branch,
+    );
+}
 pub fn update_modtime(path: []const u8) !i64 {
     const cur = std.time.timestamp();
 
@@ -364,6 +452,7 @@ pub fn main() !void {
         .flush = &flush,
         .fsync = &fsync,
         .write = &write,
+        .unlink = &unlink,
     };
 
     var fuse_args = std.ArrayList(?[:0]u8).init(ally_arena);
@@ -522,7 +611,7 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
     const size = git.git_blob_rawsize(blob);
     const content = content_ptr[0..size];
 
-    std.log.debug("Persisting path '{s}', size: {}", .{ path, content.len });
+    std.log.debug("Opening existing file '{s}', size: {}", .{ path, content.len });
 
     const new_buf = FileBuffer.init_buffer(ally, content, read_only) catch unreachable;
 
@@ -613,11 +702,6 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
     const path = std.mem.span(c_path);
     const offset: usize = @intCast(offset_c);
 
-    var it = file_buffers.keyIterator();
-    while (it.next()) |key| {
-        std.log.debug("it '{s}'", .{key.*});
-    }
-
     if (file_buffers.get(path)) |buffer| {
         const contents = buffer.contents();
         var copy_size = buf_size;
@@ -632,4 +716,10 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
     std.log.debug("path not found '{s}'", .{path});
     const ENOENT = 2;
     return -ENOENT;
+}
+
+pub fn unlink(c_path: [*c]const u8) callconv(.C) c_int {
+    const path = std.mem.span(c_path);
+    remove_file(path) catch unreachable;
+    return 0;
 }
