@@ -41,6 +41,7 @@ pub fn init(allocator: std.mem.Allocator, read_only: bool) !*Self {
     return file_buffer;
 }
 
+/// Initialize filebuffer based from an existing buffer. Makes copy of buffer, does not take ownership.
 pub fn init_buffer(allocator: std.mem.Allocator, buffer: []const u8, read_only: bool) !*Self {
     const file_buffer = try allocator.create(Self);
 

@@ -4,6 +4,8 @@ const fuse = @cImport({
     // @cInclude("fuse_wrapper.h");
     @cInclude("fuse3/fuse.h");
 });
+const ENOENT = 2;
+
 const git = @cImport({
     @cInclude("git2.h");
 });
@@ -64,6 +66,16 @@ pub fn get_dir(path: []const u8) !*git.git_tree {
     }
 
     return current_tree.?;
+}
+
+pub fn get_blob(path: []const u8) !*git.git_blob {
+    const object = try get_object(path);
+
+    const o_type = git.git_object_type(object);
+    if (o_type != git.GIT_OBJECT_BLOB)
+        return error.ObjectNotBlob;
+
+    return @ptrCast(object);
 }
 
 // get object from active repository, corresponding to path
@@ -541,7 +553,6 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
 
     const object = get_object(path) catch {
         std.log.debug("getattr no object: {s}", .{path});
-        const ENOENT = 2;
         return -ENOENT;
     };
     const o_type = git.git_object_type(object);
@@ -557,21 +568,45 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
         stat.st_mode = fuse.S_IFDIR | 0o0755;
         stat.st_nlink = 2;
     } else {
-        const ENOENT = 2;
         return -ENOENT;
     }
 
     return 0;
 }
 
-pub fn get_blob_content(blob: *git.git_blob) []const u8 {
+pub fn get_blob_content(blob: *git.git_blob) ![]const u8 {
     const content_c = git.git_blob_rawcontent(blob);
     if (content_c == null) {
-        error.NoContent;
+        return error.NoContent;
     }
     const content_ptr: [*c]const u8 = @ptrCast(content_c.?);
     const size = git.git_blob_rawsize(blob);
     return content_ptr[0..size];
+}
+
+fn get_or_put_buffer(path: []const u8, read_only: bool, trunc: bool) !*FileBuffer {
+    if (file_buffers.get(path)) |buffer| {
+        std.log.debug("Opening existing buffer", .{});
+        buffer.n_readers += 1;
+        return buffer;
+    }
+
+    const blob = try get_blob(path);
+    defer git.git_blob_free(blob);
+
+    const content = try get_blob_content(blob);
+
+    std.log.debug("Opening existing file '{s}', size: {}", .{ path, content.len });
+
+    const new_buf = try FileBuffer.init_buffer(ally, content, read_only);
+
+    if (trunc) {
+        new_buf.truncate();
+    }
+
+    const key = try ally_arena.dupe(u8, path);
+    try file_buffers.put(key, new_buf);
+    return new_buf;
 }
 
 pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
@@ -594,42 +629,10 @@ pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int 
 
     const path = std.mem.span(c_path);
 
-    if (file_buffers.get(path)) |buffer| {
-        std.log.debug("Opening existing buffer", .{});
-        buffer.n_readers += 1;
-    }
-
-    const object = get_object(path) catch {
-        std.log.debug("read: no object: {s}", .{path});
-        const ENOENT = 2;
+    _ = get_or_put_buffer(path, read_only, trunc) catch {
+        std.log.warn("Failed to open buffer '{s}'", .{path});
         return -ENOENT;
     };
-
-    const o_type = git.git_object_type(object);
-    if (o_type != git.GIT_OBJECT_BLOB) {
-        std.log.debug("object not blob: {s}", .{path});
-        const ENOENT = 2;
-        return -ENOENT;
-    }
-
-    const blob: *git.git_blob = @ptrCast(object);
-    defer git.git_blob_free(blob);
-    const content = get_blob_content() catch {
-        std.log.debug("blob has no content: {s}", .{path});
-        const ENOENT = 2;
-        return -ENOENT;
-    };
-
-    std.log.debug("Opening existing file '{s}', size: {}", .{ path, content.len });
-
-    const new_buf = FileBuffer.init_buffer(ally, content, read_only) catch unreachable;
-
-    if (trunc) {
-        new_buf.truncate();
-    }
-
-    const key = ally_arena.dupe(u8, path) catch unreachable;
-    file_buffers.put(key, new_buf) catch unreachable;
 
     return 0;
 }
@@ -655,17 +658,32 @@ pub fn release(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_i
     return 0;
 }
 
+pub fn create_buffer(path: []const u8, read_only: bool) !*FileBuffer {
+    const new_buf = try FileBuffer.init(ally, read_only);
+    const key = try ally_arena.dupe(u8, path);
+    try file_buffers.put(key, new_buf);
+    return new_buf;
+}
+
+pub fn create_buffer_from_content(path: []const u8, content: []const u8) !*FileBuffer {
+    const read_only = false;
+    const new_buf = try FileBuffer.init_buffer(ally, content, read_only);
+    const key = try ally_arena.dupe(u8, path);
+    try file_buffers.put(key, new_buf);
+    return new_buf;
+}
+
 pub fn create(c_path: [*c]const u8, mode: fuse.mode_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;
     _ = mode;
 
     std.log.debug("Create {s}", .{c_path});
 
+    const path = std.mem.span(c_path);
     const read_only = false;
-    const new_buf = FileBuffer.init(ally, read_only) catch unreachable;
-    const key = ally_arena.dupe(u8, std.mem.span(c_path)) catch unreachable;
-    file_buffers.put(key, new_buf) catch unreachable;
-
+    _ = create_buffer(path, read_only) catch {
+        return -1;
+    };
     return 0;
 }
 
@@ -728,19 +746,43 @@ pub fn read(c_path: [*c]const u8, buf: [*c]u8, buf_size: usize, offset_c: fuse.o
     }
 
     std.log.debug("path not found '{s}'", .{path});
-    const ENOENT = 2;
     return -ENOENT;
 }
 
 pub fn unlink(c_path: [*c]const u8) callconv(.C) c_int {
     const path = std.mem.span(c_path);
-    remove_file(path) catch unreachable;
+    remove_file(path) catch {
+        std.log.warn("Remove failed", .{});
+        return -1;
+    };
     return 0;
 }
 
 pub fn rename(c_src_path: [*c]const u8, c_dest_path: [*c]const u8, flag: c_uint) callconv(.C) c_int {
+    _ = flag; // todo, handle RENAME_EXCHANGE and RENAME_NOREPLACE
+
     const src_path = std.mem.span(c_src_path);
     const dest_path = std.mem.span(c_dest_path);
 
+    // load existing buffer
+    const read_only = true;
+    const trunc = false;
+    const src_buffer = get_or_put_buffer(src_path, read_only, trunc);
+    const content = src_buffer.content();
+
+    // create new buffer
+    _ = create_buffer_from_content(dest_path, content) catch {
+        std.log.warn("Failed to create {s}", .{dest_path});
+
+        return -1;
+    };
+
+    // now remove old buffer
+    remove_file(src_path) catch {
+        std.log.warn("Remove failed", .{});
+        return -1;
+    };
+    src_buffer.deinit() catch unreachable;
+    file_buffers.remove(src_path) catch unreachable;
     return 0;
 }
