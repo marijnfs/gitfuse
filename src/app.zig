@@ -12,15 +12,14 @@ pub const ally = std.heap.smp_allocator;
 var global_arena = std.heap.ArenaAllocator.init(ally);
 pub const ally_arena = global_arena.allocator();
 
-
 const FileBuffer = @import("filebuffer.zig");
 
 pub var file_buffers: std.StringHashMap(*FileBuffer) = undefined;
 var mod_times: std.StringHashMap(i64) = undefined;
 var fd_counter: u64 = 0;
 
-pub fn init(repository_path: [] const u8) !void {
-    try git.init(repository_path);
+pub fn init(repository_path: []const u8, reference_branch: []const u8, active_branch: []const u8) !void {
+    try git.init(repository_path, reference_branch, active_branch);
     file_buffers = std.StringHashMap(*FileBuffer).init(ally);
     mod_times = std.StringHashMap(i64).init(ally);
 }
@@ -58,8 +57,6 @@ pub fn get_or_put_buffer(path: []const u8, read_only: bool, trunc: bool) !*FileB
     return new_buf;
 }
 
-
-
 pub fn create_buffer(path: []const u8, read_only: bool) !*FileBuffer {
     const new_buf = try FileBuffer.init(ally, read_only);
     const key = try ally_arena.dupe(u8, path);
@@ -74,7 +71,6 @@ pub fn create_buffer_from_content(path: []const u8, content: []const u8) !*FileB
     try file_buffers.put(key, new_buf);
     return new_buf;
 }
-
 
 pub fn update_modtime(path: []const u8) !i64 {
     const cur = std.time.timestamp();
@@ -181,7 +177,7 @@ pub fn persist_file_buffer(path: []const u8) !void {
 
         // Now the new tree id is new_oid
         // Set up the commit
-        const target_branch = "gitfuse";
+        const target_branch = git.active_branch;
 
         const new_tree_oid = new_oid;
 
@@ -273,7 +269,7 @@ pub fn remove_file(path: []const u8) !void {
 
     // Now the new tree id is new_oid
     // Set up the commit
-    const target_branch = "gitfuse";
+    const target_branch = git.active_branch;
 
     const new_tree_oid = new_oid;
 

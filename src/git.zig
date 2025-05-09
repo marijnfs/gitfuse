@@ -10,6 +10,11 @@ const ally_arena = app.ally_arena;
 
 pub var repo: *cgit.git_repository = undefined;
 
+/// Reference branch is base of changes
+/// Active branch is the name of updated branch
+/// 0-terminated to operate with C
+pub var reference_branch: [:0]const u8 = "";
+pub var active_branch: [:0]const u8 = "";
 
 pub fn git_try(err_code: c_int) !void {
     if (err_code < 0) {
@@ -24,8 +29,7 @@ const Reference = struct {
     tree: *cgit.git_tree,
 };
 
-
-pub fn init(repository_path: []const u8) !void {
+pub fn init(repository_path: []const u8, reference_branch_: []const u8, active_branch_: []const u8) !void {
     try git_try(cgit.git_libgit2_init());
 
     {
@@ -34,16 +38,16 @@ pub fn init(repository_path: []const u8) !void {
         repo = repo_tmp.?;
     }
 
+    reference_branch = try ally_arena.dupeZ(u8, reference_branch_);
+    active_branch = try ally_arena.dupeZ(u8, active_branch_);
 }
 
 pub fn deinit() void {
-        std.log.info("Closing application", .{});
+    std.log.info("Closing application", .{});
     _ = cgit.git_libgit2_shutdown();
 
     cgit.git_repository_free(repo);
-
 }
-
 
 // get tree in active repository, corresponding to path
 pub fn get_dir(path: []const u8) !*cgit.git_tree {
@@ -122,7 +126,7 @@ pub fn create_commit(tree: *cgit.git_tree, parent: *cgit.git_commit, reference_o
     var oid = std.mem.zeroes(cgit.git_oid);
 
     const author: cgit.git_signature = .{
-        .name = @constCast("gitfuse"),
+        .name = @constCast(active_branch),
         .email = @constCast(""),
         .when = .{
             .time = std.time.timestamp(),
@@ -152,8 +156,6 @@ pub fn create_commit(tree: *cgit.git_tree, parent: *cgit.git_commit, reference_o
 
 pub fn get_reference() !Reference {
     var reference_treeish: ?*cgit.git_object = null;
-
-    const reference_branch = "refs/heads/master";
     try git_try(cgit.git_revparse_single(&reference_treeish, repo, reference_branch));
 
     var ref_commit: ?*cgit.git_commit = null;
@@ -169,15 +171,13 @@ pub fn get_reference() !Reference {
 }
 
 pub fn get_active_tree() !*cgit.git_tree {
-    const target_branch = "gitfuse";
-
     var treeish: ?*cgit.git_object = null;
-    git_try(cgit.git_revparse_single(&treeish, repo, target_branch)) catch {
+    git_try(cgit.git_revparse_single(&treeish, repo, active_branch)) catch {
         std.log.debug("Didn't find target branch, creating it", .{});
 
         const ref = try get_reference();
 
-        _ = try create_commit(ref.tree, ref.commit, target_branch);
+        _ = try create_commit(ref.tree, ref.commit, active_branch);
 
         // Finally the treeish is gonna point to the ref tree
         return ref.tree;
@@ -191,7 +191,6 @@ pub fn get_active_tree() !*cgit.git_tree {
 
     return ref_tree.?;
 }
-
 
 pub fn get_blob_content(blob: *cgit.git_blob) ![]const u8 {
     const content_c = cgit.git_blob_rawcontent(blob);

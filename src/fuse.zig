@@ -106,7 +106,6 @@ pub fn getattr(c_path: [*c]const u8, stbuf: ?*fuse.struct_stat, fi: ?*fuse.fuse_
     return 0;
 }
 
-
 pub fn open(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     const packed_fi: *FuseFileInfo = @alignCast(@ptrCast(fi.?));
     packed_fi.fh = 123; //TODO: use fh for buffers
@@ -155,7 +154,6 @@ pub fn release(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_i
     _ = fi;
     return 0;
 }
-
 
 pub fn create(c_path: [*c]const u8, mode: fuse.mode_t, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
     _ = fi;

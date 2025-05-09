@@ -14,7 +14,9 @@ pub fn main() !void {
         .author("Marijn Stollenga")
         .homepage("")
         .optArg("repository", []const u8, .{ .short = 'r', .long = "repository" })
-        .optArg("mount", []const u8, .{ .short = 'm', .long = "mount" });
+        .optArg("mount", []const u8, .{ .short = 'm', .long = "mount" })
+        .optArg("reference", ?[]const u8, .{ .long = "reference" })
+        .optArg("active", ?[]const u8, .{ .long = "active" });
 
     const args = cmd.parse(ally) catch |e|
         zargs.exitf(e, 1, "\n{s}\n", .{cmd.usage()});
@@ -22,7 +24,10 @@ pub fn main() !void {
 
     std.debug.print("Store log into {s}\n", .{args.repository});
 
-    try app.init(args.repository);
+    const reference = args.reference orelse "master";
+    const active = args.active orelse "gitfuse";
+
+    try app.init(args.repository, reference, active);
     defer app.deinit();
 
     const operations: fuse.fuse.fuse_operations = .{
@@ -54,6 +59,3 @@ pub fn main() !void {
     // fuse_main is supposed to be called instead of fuse_main_fn, but it is a #define and not a proper function
     _ = fuse.fuse.fuse_main_passthrough(@intCast(c_strings.len), @ptrCast(c_strings.ptr), &operations, null);
 }
-
-
-
