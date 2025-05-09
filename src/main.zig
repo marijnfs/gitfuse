@@ -464,6 +464,7 @@ pub fn main() !void {
         .fsync = &fsync,
         .write = &write,
         .unlink = &unlink,
+        .rename = &rename,
     };
 
     var fuse_args = std.ArrayList(?[:0]u8).init(ally_arena);
@@ -767,8 +768,11 @@ pub fn rename(c_src_path: [*c]const u8, c_dest_path: [*c]const u8, flag: c_uint)
     // load existing buffer
     const read_only = true;
     const trunc = false;
-    const src_buffer = get_or_put_buffer(src_path, read_only, trunc);
-    const content = src_buffer.content();
+    const src_buffer = get_or_put_buffer(src_path, read_only, trunc) catch {
+        std.log.warn("Failed to get buffer {s}", .{src_path});
+        return -1;
+    };
+    const content = src_buffer.contents();
 
     // create new buffer
     _ = create_buffer_from_content(dest_path, content) catch {
@@ -782,7 +786,7 @@ pub fn rename(c_src_path: [*c]const u8, c_dest_path: [*c]const u8, flag: c_uint)
         std.log.warn("Remove failed", .{});
         return -1;
     };
-    src_buffer.deinit() catch unreachable;
-    file_buffers.remove(src_path) catch unreachable;
+    src_buffer.deinit(ally);
+    _ = file_buffers.remove(src_path);
     return 0;
 }
