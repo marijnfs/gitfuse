@@ -42,6 +42,7 @@ pub fn main() !void {
         .write = &fuse.write,
         .unlink = &fuse.unlink,
         .rename = &fuse.rename,
+        .utimens = &fuse.utimens,
     };
 
     var fuse_args = std.ArrayList(?[:0]u8).init(ally_arena);

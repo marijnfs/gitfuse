@@ -271,3 +271,14 @@ pub fn rename(c_src_path: [*c]const u8, c_dest_path: [*c]const u8, flag: c_uint)
     _ = app.file_buffers.remove(src_path);
     return 0;
 }
+
+pub fn utimens(c_path: [*c]const u8, tv: [*c]const fuse.timespec, fi: ?*fuse.fuse_file_info) callconv(.C) c_int {
+    const path = std.mem.span(c_path);
+    std.log.debug("utimens: {s}", .{path});
+
+    //TODO: implement
+
+    _ = tv;
+    _ = fi;
+    return 0;
+}
