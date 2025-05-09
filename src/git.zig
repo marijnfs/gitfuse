@@ -1,0 +1,213 @@
+const std = @import("std");
+
+pub const cgit = @cImport({
+    @cInclude("git2.h");
+});
+
+const app = @import("app.zig");
+const ally = app.ally;
+const ally_arena = app.ally_arena;
+
+pub var repo: *cgit.git_repository = undefined;
+
+
+pub fn git_try(err_code: c_int) !void {
+    if (err_code < 0) {
+        const err: *const cgit.git_error = cgit.git_error_last();
+        std.log.warn("Git error: {s}", .{err.message});
+        return error.git_error;
+    }
+}
+
+const Reference = struct {
+    commit: *cgit.git_commit,
+    tree: *cgit.git_tree,
+};
+
+
+pub fn init(repository_path: []const u8) !void {
+    try git_try(cgit.git_libgit2_init());
+
+    {
+        var repo_tmp: ?*cgit.git_repository = null;
+        try git_try(cgit.git_repository_open(&repo_tmp, try ally_arena.dupeZ(u8, repository_path)));
+        repo = repo_tmp.?;
+    }
+
+}
+
+pub fn deinit() void {
+        std.log.info("Closing application", .{});
+    _ = cgit.git_libgit2_shutdown();
+
+    cgit.git_repository_free(repo);
+
+}
+
+
+// get tree in active repository, corresponding to path
+pub fn get_dir(path: []const u8) !*cgit.git_tree {
+    const tree = try get_active_tree();
+
+    var current_tree: ?*cgit.git_tree = tree;
+    var it = std.mem.tokenizeSequence(u8, path, "/");
+
+    while (it.next()) |subpath| {
+        const subpath_z = try ally.dupeZ(u8, subpath);
+        defer ally.free(subpath_z);
+
+        const entry = cgit.git_tree_entry_byname(current_tree, subpath_z);
+        if (entry == null)
+            return error.NotFound;
+
+        const entry_type = cgit.git_tree_entry_type(entry);
+        if (entry_type != cgit.GIT_OBJ_TREE) {
+            return error.ExpectedTree;
+        }
+
+        const oid = cgit.git_tree_entry_id(entry);
+        try git_try(cgit.git_tree_lookup(&current_tree, repo, oid));
+    }
+
+    return current_tree.?;
+}
+
+pub fn get_blob(path: []const u8) !*cgit.git_blob {
+    const object = try get_object(path);
+
+    const o_type = cgit.git_object_type(object);
+    if (o_type != cgit.GIT_OBJECT_BLOB)
+        return error.ObjectNotBlob;
+
+    return @ptrCast(object);
+}
+
+// get object from active repository, corresponding to path
+pub fn get_object(path: []const u8) !*cgit.git_object {
+    const tree = try get_active_tree();
+
+    var current_tree: ?*cgit.git_tree = tree;
+    var it = std.mem.tokenizeSequence(u8, path, "/");
+
+    while (it.next()) |subpath| {
+        const subpath_z = try ally.dupeZ(u8, subpath);
+        defer ally.free(subpath_z);
+
+        const entry = cgit.git_tree_entry_byname(current_tree, subpath_z);
+        if (entry == null)
+            return error.NotFound;
+
+        const entry_type = cgit.git_tree_entry_type(entry);
+        const oid = cgit.git_tree_entry_id(entry);
+
+        const last_comparison = it.peek() == null;
+        if (last_comparison) {
+            var obj_c: ?*cgit.git_object = null;
+            try git_try(cgit.git_object_lookup(&obj_c, repo, oid, cgit.GIT_OBJECT_ANY));
+            if (obj_c == null) {
+                return error.FailedLookup;
+            }
+            return obj_c.?;
+        }
+        if (entry_type != cgit.GIT_OBJ_TREE) {
+            return error.ExpectedTree;
+        }
+        try git_try(cgit.git_tree_lookup(&current_tree, repo, oid));
+    }
+
+    return error.NotFound;
+}
+
+pub fn create_commit(tree: *cgit.git_tree, parent: *cgit.git_commit, reference_opt: ?[]const u8) !cgit.git_oid {
+    var oid = std.mem.zeroes(cgit.git_oid);
+
+    const author: cgit.git_signature = .{
+        .name = @constCast("gitfuse"),
+        .email = @constCast(""),
+        .when = .{
+            .time = std.time.timestamp(),
+            .offset = 0,
+            .sign = 0,
+        },
+    };
+
+    const parents: [1]*cgit.git_commit = .{parent};
+
+    try git_try(cgit.git_commit_create(&oid, repo, null, &author, &author, "UTF-8", "GitFuse", tree, parents.len, @constCast(@ptrCast(&parents))));
+
+    var commit: ?*cgit.git_commit = null;
+    try git_try(cgit.git_commit_lookup(&commit, repo, &oid));
+
+    if (reference_opt) |reference| {
+        const reference_c = try ally.dupeZ(u8, reference);
+        defer ally.free(reference_c);
+
+        var git_reference: ?*cgit.git_reference = null;
+        const force = 1;
+        try git_try(cgit.git_branch_create(&git_reference, repo, reference_c, commit, force));
+    }
+
+    return oid;
+}
+
+pub fn get_reference() !Reference {
+    var reference_treeish: ?*cgit.git_object = null;
+
+    const reference_branch = "refs/heads/master";
+    try git_try(cgit.git_revparse_single(&reference_treeish, repo, reference_branch));
+
+    var ref_commit: ?*cgit.git_commit = null;
+    try git_try(cgit.git_commit_lookup(&ref_commit, repo, cgit.git_object_id(reference_treeish)));
+
+    var ref_tree: ?*cgit.git_tree = null;
+    try git_try(cgit.git_commit_tree(&ref_tree, ref_commit));
+
+    return .{
+        .commit = ref_commit.?,
+        .tree = ref_tree.?,
+    };
+}
+
+pub fn get_active_tree() !*cgit.git_tree {
+    const target_branch = "gitfuse";
+
+    var treeish: ?*cgit.git_object = null;
+    git_try(cgit.git_revparse_single(&treeish, repo, target_branch)) catch {
+        std.log.debug("Didn't find target branch, creating it", .{});
+
+        const ref = try get_reference();
+
+        _ = try create_commit(ref.tree, ref.commit, target_branch);
+
+        // Finally the treeish is gonna point to the ref tree
+        return ref.tree;
+    };
+
+    var ref_commit: ?*cgit.git_commit = null;
+    try git_try(cgit.git_commit_lookup(&ref_commit, repo, cgit.git_object_id(treeish)));
+
+    var ref_tree: ?*cgit.git_tree = null;
+    try git_try(cgit.git_commit_tree(&ref_tree, ref_commit));
+
+    return ref_tree.?;
+}
+
+
+pub fn get_blob_content(blob: *cgit.git_blob) ![]const u8 {
+    const content_c = cgit.git_blob_rawcontent(blob);
+    if (content_c == null) {
+        return error.NoContent;
+    }
+    const content_ptr: [*c]const u8 = @ptrCast(content_c.?);
+    const size = cgit.git_blob_rawsize(blob);
+    return content_ptr[0..size];
+}
+
+pub fn list_git_dir(tree: *cgit.git_tree) void {
+    const N = cgit.git_tree_entrycount(tree);
+    for (0..N) |n| {
+        const entry = cgit.git_tree_entry_byindex(tree, n);
+        const name = cgit.git_tree_entry_name(entry);
+        std.log.info("entry: {s}", .{name});
+    }
+}
