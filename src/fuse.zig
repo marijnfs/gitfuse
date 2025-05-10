@@ -138,6 +138,11 @@ pub fn release(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_i
     std.log.debug("Release {s}", .{c_path});
     const path = std.mem.span(c_path);
 
+    if (git.is_ignored(path) catch |err| return fuse_error(err)) {
+        // Dont close ignored files. They are not persisted and can't be recovered otherwise
+        return 0;
+    }
+
     app.persist_file_buffer(path) catch {
         std.log.warn("Buffer not found during release", .{});
         return 0;
@@ -242,6 +247,7 @@ pub fn unlink(c_path: [*c]const u8) callconv(.C) c_int {
 
 pub fn rename(c_src_path: [*c]const u8, c_dest_path: [*c]const u8, flag: c_uint) callconv(.C) c_int {
     _ = flag; // todo, handle RENAME_EXCHANGE and RENAME_NOREPLACE
+    std.log.debug("Rename {s} to {s}", .{ c_src_path, c_dest_path });
 
     const src_path = std.mem.span(c_src_path);
     const dest_path = std.mem.span(c_dest_path);
@@ -253,21 +259,22 @@ pub fn rename(c_src_path: [*c]const u8, c_dest_path: [*c]const u8, flag: c_uint)
         std.log.warn("Failed to get buffer {s}", .{src_path});
         return -1;
     };
-    const content = src_buffer.contents();
+    defer src_buffer.deinit(ally);
 
     // create new buffer
+    const content = src_buffer.contents();
     _ = app.create_buffer_from_content(dest_path, content) catch {
         std.log.warn("Failed to create {s}", .{dest_path});
 
         return -1;
     };
+    app.persist_file_buffer(dest_path) catch |err| return fuse_error(err);
 
     // now remove old buffer
     app.remove_file(src_path) catch {
         std.log.warn("Remove failed", .{});
         return -1;
     };
-    src_buffer.deinit(ally);
     _ = app.file_buffers.remove(src_path);
     return 0;
 }
@@ -281,4 +288,22 @@ pub fn utimens(c_path: [*c]const u8, tv: [*c]const fuse.timespec, fi: ?*fuse.fus
     _ = tv;
     _ = fi;
     return 0;
+}
+
+pub fn mkdir(c_path: [*c]const u8, mode: fuse.mode_t) callconv(.C) c_int {
+    const path = std.mem.span(c_path);
+    std.log.debug("mkdir: {s}", .{path});
+
+    _ = mode;
+    git.insert_empty_tree(path) catch |err| return fuse_error(err);
+    return 0;
+}
+
+fn fuse_error(err: anyerror) c_int {
+    std.log.warn("Fuse error: {}", .{err});
+    switch (err) {
+        else => {
+            return -1;
+        },
+    }
 }

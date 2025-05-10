@@ -100,6 +100,14 @@ pub fn get_modtime(path: []const u8) !i64 {
 // If buffer does not exist, that is an error
 pub fn persist_file_buffer(path: []const u8) !void {
     std.log.debug("Persisting: {s}", .{path});
+
+    if (try git.is_ignored(path)) {
+        std.log.debug("Ignoring: {s}", .{path});
+
+        // Ignored files are not to be persisted
+        return;
+    }
+
     if (file_buffers.get(path)) |buffer| {
         if (buffer.read_only) {
             return;

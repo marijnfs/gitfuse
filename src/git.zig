@@ -210,3 +210,96 @@ pub fn list_git_dir(tree: *cgit.git_tree) void {
         std.log.info("entry: {s}", .{name});
     }
 }
+
+pub fn insert_empty_tree(path: []const u8) !void {
+    std.log.debug("Make Tree: {s}", .{path});
+
+    // Grab our active target tree and setup the builder
+    const active_tree = try get_active_tree();
+    const reference = try get_reference();
+
+    // Find the sequence of trees to the path
+    var trees = std.ArrayList(*cgit.git_tree).init(ally);
+    var paths = std.ArrayList([]const u8).init(ally);
+    defer trees.deinit();
+    defer paths.deinit();
+
+    var it = std.mem.tokenizeSequence(u8, path, "/");
+
+    var current_tree: ?*cgit.git_tree = active_tree;
+
+    while (it.next()) |subpath| {
+        try trees.append(current_tree.?);
+        try paths.append(subpath);
+
+        const last_comparison = it.peek() == null;
+        if (last_comparison) {
+            // We are on the last level and found the file
+            break;
+        }
+
+        const subpath_z = try ally.dupeZ(u8, subpath);
+        defer ally.free(subpath_z);
+
+        const entry = cgit.git_tree_entry_byname(current_tree, subpath_z);
+        if (entry == null)
+            return error.NotFound;
+
+        const entry_type = cgit.git_tree_entry_type(entry);
+        const sub_oid = cgit.git_tree_entry_id(entry);
+
+        if (entry_type != cgit.GIT_OBJ_TREE) {
+            return error.ExpectedTree;
+        }
+
+        try git_try(cgit.git_tree_lookup(&current_tree, repo, sub_oid));
+    }
+
+    var new_oid = std.mem.zeroes(cgit.git_oid);
+    {
+        var builder: ?*cgit.git_treebuilder = null;
+        try git_try(cgit.git_treebuilder_new(&builder, repo, null));
+        defer cgit.git_treebuilder_free(builder);
+
+        try git_try(cgit.git_treebuilder_write(&new_oid, builder));
+    }
+
+    // Now recursively build up the updated tree
+    var i: usize = trees.items.len;
+    while (i > 0) {
+        i -= 1;
+        const tree = trees.items[i];
+        const subpath = paths.items[i];
+        const subpath_c = try ally.dupeZ(u8, subpath);
+        defer ally.free(subpath_c);
+
+        var builder: ?*cgit.git_treebuilder = null;
+        try git_try(cgit.git_treebuilder_new(&builder, repo, tree));
+        defer cgit.git_treebuilder_free(builder);
+
+        std.log.debug("Print path: {s} {}", .{ subpath_c, new_oid });
+        try git_try(cgit.git_treebuilder_insert(null, builder, subpath_c, &new_oid, cgit.GIT_FILEMODE_TREE));
+        var tree_oid: cgit.git_oid = undefined;
+        try git_try(cgit.git_treebuilder_write(&tree_oid, builder));
+
+        new_oid = tree_oid;
+    }
+
+    const new_tree_oid = new_oid;
+
+    var new_tree: ?*cgit.git_tree = null;
+    try git_try(cgit.git_tree_lookup(&new_tree, repo, &new_tree_oid));
+    _ = try create_commit(
+        new_tree.?,
+        reference.commit,
+        active_branch,
+    );
+    std.log.debug("Done Making Tree: {s}", .{path});
+}
+
+pub fn is_ignored(path: []const u8) !bool {
+    const c_path = try app.ally.dupeZ(u8, path);
+    var ignored: c_int = 0;
+    try git_try(cgit.git_ignore_path_is_ignored(&ignored, repo, c_path));
+    return ignored > 0;
+}
