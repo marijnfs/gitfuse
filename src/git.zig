@@ -299,6 +299,7 @@ pub fn insert_empty_tree(path: []const u8) !void {
 
 pub fn is_ignored(path: []const u8) !bool {
     const c_path = try app.ally.dupeZ(u8, path);
+    defer app.ally.free(c_path);
     var ignored: c_int = 0;
     try git_try(cgit.git_ignore_path_is_ignored(&ignored, repo, c_path));
     return ignored > 0;

@@ -139,6 +139,7 @@ pub fn release(c_path: [*c]const u8, fi: ?*fuse.fuse_file_info) callconv(.C) c_i
     const path = std.mem.span(c_path);
 
     if (git.is_ignored(path) catch |err| return fuse_error(err)) {
+        std.log.debug("Ignore Release {s}", .{path});
         // Dont close ignored files. They are not persisted and can't be recovered otherwise
         return 0;
     }
