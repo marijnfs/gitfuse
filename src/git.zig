@@ -40,6 +40,16 @@ pub fn init(repository_path: []const u8, reference_branch_: []const u8, active_b
 
     reference_branch = try ally_arena.dupeZ(u8, reference_branch_);
     active_branch = try ally_arena.dupeZ(u8, active_branch_);
+
+    //try to load ignore file
+    if (try get_blob(".gitignore")) |blob| {
+        defer cgit.git_blob_free(blob);
+
+        const content = try get_blob_content(blob);
+        const contentZ = try ally.dupeZ(u8, content);
+        defer ally.free(contentZ);
+        try git_try(cgit.git_ignore_add_rule(repo, contentZ));
+    }
 }
 
 pub fn deinit() void {
@@ -76,8 +86,8 @@ pub fn get_dir(path: []const u8) !*cgit.git_tree {
     return current_tree.?;
 }
 
-pub fn get_blob(path: []const u8) !*cgit.git_blob {
-    const object = try get_object(path);
+pub fn get_blob(path: []const u8) !?*cgit.git_blob {
+    const object = get_object(path) catch return null;
 
     const o_type = cgit.git_object_type(object);
     if (o_type != cgit.GIT_OBJECT_BLOB)

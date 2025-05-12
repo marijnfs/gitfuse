@@ -39,7 +39,7 @@ pub fn get_or_put_buffer(path: []const u8, read_only: bool, trunc: bool) !*FileB
         return buffer;
     }
 
-    const blob = try git.get_blob(path);
+    const blob = try git.get_blob(path) orelse return error.NoBufferFound;
     defer cgit.git_blob_free(blob);
 
     const content = try git.get_blob_content(blob);
