@@ -25,6 +25,6 @@ Many of the basic functionalities are there, but there might be bugs!:
 - To merge your changes to your reference branch, you would have to manually use git commands to merge the changes to your reference branch.
 
 ## Todo
-[] Streaming API: currently any file that is opened is fully read into memory, until it is closed. This could lead to excessive memory usage. Using the streaming API, files could be read in a streaming manner directly from the file-system on demand.
-[] Multi-threading: Currently FUSE is set in a single-threaded mode because of the absence of any thread-safety in the current code. Supporting multi-threading can be done, but needs to be done carefully to actually make it efficient and safe.
-[] Multi-mount: An interesting added functionality would be to mount several branches in different mount points from a single repository at the same time. This corresponds to quite a few development workflows where you work on a few feature-branches at the same time.
+- Streaming API: currently any file that is opened is fully read into memory, until it is closed. This could lead to excessive memory usage. Using the streaming API, files could be read in a streaming manner directly from the file-system on demand.
+- Multi-threading: Currently FUSE is set in a single-threaded mode because of the absence of any thread-safety in the current code. Supporting multi-threading can be done, but needs to be done carefully to actually make it efficient and safe.
+- Multi-mount: An interesting added functionality would be to mount several branches in different mount points from a single repository at the same time. This corresponds to quite a few development workflows where you work on a few feature-branches at the same time.
